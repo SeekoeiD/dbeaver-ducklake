@@ -1,0 +1,16 @@
+# Build outputs
+**/target/
+plugin/dist/
+
+# Local stack state
+docker/pg-data/
+docker/rustfs-data/
+
+# Local env (publish .env.example instead)
+docker/.env
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+*.iml

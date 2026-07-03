@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?eclipse version="3.2"?>
+
+<plugin>
+
+    <!--
+      DuckLake data source. Built on top of the bundled DuckDB plugin:
+        - reuses DuckDB's data source / execution context / catalog model
+        - overrides table listing to enumerate the attached DuckLake catalog
+        - auto-generates a session_init_sql_file so the ATTACH runs on EVERY
+          physical JDBC connection (this is what makes tables reliably show up).
+    -->
+    <extension point="org.jkiss.dbeaver.dataSourceProvider">
+        <datasource
+                class="org.jkiss.dbeaver.ext.ducklake.model.DuckLakeDataSourceProvider"
+                description="DuckLake (DuckDB lakehouse) connector"
+                id="ducklake"
+                parent="generic"
+                label="DuckLake"
+                icon="platform:/plugin/org.jkiss.dbeaver.ext.ducklake/icons/ducklake.svg"
+                dialect="duckdb">
+            <drivers managable="true">
+                <driver
+                        id="ducklake_jdbc"
+                        label="DuckLake"
+                        icon="platform:/plugin/org.jkiss.dbeaver.ext.ducklake/icons/ducklake.svg"
+                        iconBig="platform:/plugin/org.jkiss.dbeaver.ext.ducklake/icons/ducklake_big.svg"
+                        class="org.duckdb.DuckDBDriver"
+                        sampleURL="jdbc:ducklake:postgres://{host}:{port}/{database}"
+                        defaultPort="5432"
+                        webURL="https://ducklake.select/"
+                        description="DuckLake via the DuckDB JDBC driver. Host/Port/Database/User/Password point at the Postgres CATALOG; S3 storage is configured in Driver properties."
+                        categories="sql,analytic">
+                    <file type="jar" path="maven:/org.duckdb:duckdb_jdbc:1.5.4.0"/>
+                    <file type="license" path="https://raw.githubusercontent.com/duckdb/duckdb/master/LICENSE"/>
+                    <!-- Force our metadata model so the catalog filter (hide DuckDB's internal
+                         memory/system/temp catalogs) runs. Without this, DBeaver resolves the model
+                         by JDBC driver class to the bundled DuckDB one and the filter never runs. -->
+                    <parameter name="meta-model" value="ducklake_jdbc"/>
+                </driver>
+                <provider-properties>
+                    <propertyGroup label="DuckLake storage (S3)">
+                        <property id="ducklake.s3.endpoint"  label="S3 endpoint (host:port)" type="string"  description="S3 endpoint without scheme, e.g. localhost:9000 or s3.amazonaws.com. Leave blank for AWS default."/>
+                        <property id="ducklake.s3.key"       label="S3 access key"          type="string"  description="S3 access key id. Leave blank to use the AWS credential chain."/>
+                        <property id="ducklake.s3.secret"    label="S3 secret key"          type="string"  description="S3 secret access key"/>
+                        <property id="ducklake.s3.region"    label="S3 region"              type="string"  description="e.g. us-east-1 (defaults to us-east-1 if blank)"/>
+                        <property id="ducklake.s3.url_style" label="S3 URL style"           type="string"  description="'path' for MinIO/RustFS-style servers; blank = provider default (vhost)"/>
+                        <property id="ducklake.s3.use_ssl"   label="S3 use SSL"             type="boolean" description="On for https endpoints (AWS); off for local http"/>
+                        <property id="ducklake.data_path"    label="DuckLake DATA_PATH"     type="string"  description="Storage location, e.g. s3://bucket/prefix/ (trailing slash)"/>
+                        <property id="ducklake.alias"        label="Catalog alias"          type="string"  description="Name the DuckLake is attached as (defaults to 'lake')"/>
+                    </propertyGroup>
+                </provider-properties>
+            </drivers>
+        </datasource>
+    </extension>
+
+    <!-- Custom metadata model: reliable table listing for the attached catalog. -->
+    <extension point="org.jkiss.dbeaver.generic.meta">
+        <meta id="ducklake_jdbc"
+              class="org.jkiss.dbeaver.ext.ducklake.model.DuckLakeMetaModel"
+              driverClass="org.duckdb.DuckDBDriver"
+              dialect="duckdb"/>
+    </extension>
+
+</plugin>

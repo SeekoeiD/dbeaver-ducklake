@@ -1,0 +1,3 @@
+# Local state — do not commit
+pg-data/
+rustfs-data/

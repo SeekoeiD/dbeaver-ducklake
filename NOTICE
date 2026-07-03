@@ -1,0 +1,13 @@
+DBeaver DuckLake Plugin
+Copyright 2026 SeekoeiD
+
+This product includes software developed at
+DBeaver Corp (https://dbeaver.com/).
+
+The plugins in plugin/org.jkiss.dbeaver.ext.ducklake and
+plugin/org.jkiss.dbeaver.ext.ducklake.ui build on and extend DBeaver's
+Apache-2.0 licensed code (notably org.jkiss.dbeaver.ext.duckdb and
+org.jkiss.dbeaver.ext.generic). DBeaver is a trademark of DBeaver Corp.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.

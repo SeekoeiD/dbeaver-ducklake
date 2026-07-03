@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?eclipse version="3.2"?>
+
+<plugin>
+
+    <!-- Custom connection UI for the DuckLake data source (id="ducklake").
+         Main page reuses the generic page (Host/Port/Database/User/Password = Postgres catalog);
+         an extra tab collects the S3 storage settings. -->
+    <extension point="org.jkiss.dbeaver.dataSourceView">
+        <view
+                id="org.jkiss.dbeaver.ext.ducklake.dataSourceWizardView"
+                targetID="org.jkiss.dbeaver.ext.ui.newConnectionWizard"
+                dataSource="ducklake"
+                label="DuckLake connection settings"
+                class="org.jkiss.dbeaver.ext.ducklake.ui.DuckLakeConnectionPage"
+                icon="platform:/plugin/org.jkiss.dbeaver.ext.ducklake/icons/ducklake.svg">
+        </view>
+        <view
+                id="org.jkiss.dbeaver.ext.ducklake.dataSourceEditorView"
+                targetID="org.jkiss.dbeaver.ext.ui.editConnectionDialog"
+                dataSource="ducklake"
+                label="DuckLake connection settings"
+                class="org.jkiss.dbeaver.ext.ducklake.ui.DuckLakeConnectionPage"
+                icon="platform:/plugin/org.jkiss.dbeaver.ext.ducklake/icons/ducklake.svg">
+        </view>
+    </extension>
+
+</plugin>

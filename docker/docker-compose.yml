@@ -1,0 +1,84 @@
+name: ducklake
+
+services:
+  # ----------------------------------------------------------------------
+  # DuckLake catalog (metadata) — Postgres
+  # ----------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: ducklake-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ducklake_catalog}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      # Host 5433 -> container 5432 (host 5432 is often already taken by a local Postgres).
+      - "5433:5432"
+    volumes:
+      - ./pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ducklake_catalog}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------
+  # DuckLake data storage — RustFS (S3-compatible object store)
+  #   S3 API : http://localhost:9000
+  #   Console: http://localhost:9001   (login rustfsadmin / rustfsadmin)
+  # ----------------------------------------------------------------------
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: ducklake-rustfs
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./rustfs-data:/data
+    command: ["/data"]
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------
+  # One-shot: create the S3 bucket that holds the DuckLake Parquet data
+  # ----------------------------------------------------------------------
+  createbucket:
+    image: minio/mc:latest
+    container_name: ducklake-createbucket
+    depends_on:
+      rustfs:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      for i in $$(seq 1 30); do
+        mc alias set rfs http://rustfs:9000 ${RUSTFS_ACCESS_KEY:-rustfsadmin} ${RUSTFS_SECRET_KEY:-rustfsadmin} && break;
+        echo 'waiting for rustfs...'; sleep 2;
+      done &&
+      mc mb --ignore-existing rfs/${S3_BUCKET:-ducklake} &&
+      echo '--- buckets ---' && mc ls rfs
+      "
+    restart: "no"
+
+  # ----------------------------------------------------------------------
+  # One-shot: create + populate the DuckLake with generic demo data,
+  # BEFORE any DBeaver connection (so tables already exist on first browse).
+  # ----------------------------------------------------------------------
+  seed:
+    image: python:3.12-slim
+    container_name: ducklake-seed
+    depends_on:
+      postgres:
+        condition: service_healthy
+      createbucket:
+        condition: service_completed_successfully
+    volumes:
+      - ./sql:/sql:ro
+    command:
+      - /bin/sh
+      - -c
+      - "pip install --no-cache-dir duckdb==${DUCKDB_VERSION:-1.5.4} && python /sql/seed.py"
+    restart: "no"
