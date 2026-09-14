@@ -24,10 +24,10 @@ import java.util.regex.Pattern;
  * <p>A DuckLake catalog is a set of {@code ducklake_*} metadata tables in one Postgres schema, so a
  * catalog is identified by (database, schema). Two scopes are searched:
  * <ul>
- *   <li>the other schemas of the connection's own database, attached as {@code <schema>};</li>
- *   <li>every other database on the server the user may connect to, attached as
- *       {@code <database>.<schema>}.</li>
+ *   <li>the other schemas of the connection's own database;</li>
+ *   <li>every other database on the server the user may connect to.</li>
  * </ul>
+ * Every catalog is attached as {@code <database>.<schema>}, the same default name the primary gets.
  * The primary catalog (the connection's database + metadata schema) is attached by the init file,
  * so it is skipped here.
  */
@@ -100,7 +100,8 @@ public final class DuckLakeCatalogDiscovery {
             if (includeSchemas) {
                 for (String schema : pgQuery(con, META_ALIAS, DUCKLAKE_SCHEMAS_SQL)) {
                     if (!schema.equals(primarySchema)) {
-                        addTarget(targets, warnings, schema, new Target(pgConn, schema, "schema '" + schema + "'"));
+                        addTarget(targets, warnings, DuckLakeDataSourceProvider.defaultAlias(db, schema),
+                            new Target(pgConn, schema, "schema '" + schema + "'"));
                     }
                 }
             }

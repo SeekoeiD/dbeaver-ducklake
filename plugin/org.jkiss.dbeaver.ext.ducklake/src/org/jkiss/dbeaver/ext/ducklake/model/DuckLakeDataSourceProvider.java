@@ -65,7 +65,7 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
             ? DuckLakeConstants.DEF_METADATA_SCHEMA : cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA);
 
         String alias = CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS))
-            ? metadataSchema : cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS);
+            ? defaultAlias(db, metadataSchema) : cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS);
 
         String defaultSchema = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DEFAULT_SCHEMA)).trim();
 
@@ -83,6 +83,15 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
 
     private static String connectionURL(String initFilePath) {
         return "jdbc:duckdb:;session_init_sql_file=" + initFilePath + ";jdbc_pin_db=true;jdbc_stream_results=true;";
+    }
+
+    /**
+     * Name a catalog after where it lives, {@code <database>.<metadata schema>}, so every node in the
+     * tree says which Postgres database and schema it comes from. Without a database setting it is
+     * just the schema name.
+     */
+    public static String defaultAlias(String db, String metadataSchema) {
+        return CommonUtils.isEmpty(db) ? metadataSchema : db + "." + metadataSchema;
     }
 
     private static String buildInitSql(

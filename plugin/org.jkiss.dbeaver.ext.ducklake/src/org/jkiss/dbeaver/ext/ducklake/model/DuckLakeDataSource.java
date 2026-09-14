@@ -31,9 +31,9 @@ import java.util.Map;
  * object filter, so the connection shows no "Filtered by settings" badge.
  *
  * <p>On initialization it also discovers the other DuckLake catalogs on the same Postgres server
- * and ATTACHes each so it appears as its own top-level node: {@code <schema>} for catalogs in this
- * database ({@code ducklake.discover_schemas}), {@code <database>.<schema>} for catalogs in other
- * databases ({@code ducklake.discover_databases}). Both default on. Every execution context opened
+ * and ATTACHes each as its own top-level node named {@code <database>.<schema>}: catalogs in this
+ * database ({@code ducklake.discover_schemas}) and in other databases
+ * ({@code ducklake.discover_databases}). Both default on. Every execution context opened
  * afterwards (Metadata, SQL editors) replays those ATTACHes one catalog at a time.
  */
 public class DuckLakeDataSource extends DuckDBDataSource {
@@ -155,7 +155,8 @@ public class DuckLakeDataSource extends DuckDBDataSource {
 
     private static String primaryAlias(DBPConnectionConfiguration cfg) {
         return CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS))
-            ? primarySchema(cfg) : cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS);
+            ? DuckLakeDataSourceProvider.defaultAlias(cfg.getDatabaseName(), primarySchema(cfg))
+            : cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS);
     }
 
     /**

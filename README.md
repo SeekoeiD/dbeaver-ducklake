@@ -63,10 +63,10 @@ Uninstall with `uninstall.ps1` / `uninstall.sh` (same arguments), then restart w
 | … Region / URL style / Use SSL | `path` style for MinIO/RustFS; SSL on for https endpoints |
 | … DATA_PATH | storage location, e.g. `s3://bucket/prefix/` (only needed when the ATTACH creates a brand-new catalog; existing catalogs store it in their metadata) |
 | DuckLake catalog → Metadata schema (Postgres) | Postgres schema holding the **primary** catalog's `ducklake_*` metadata tables (default `public`) |
-| … Catalog alias | name the primary catalog is attached as (defaults to the metadata schema name, e.g. `public`) |
+| … Catalog alias | name the primary catalog is attached as (defaults to `<database>.<metadata schema>`, e.g. `ducklake_catalog.public`) |
 | … Default schema (DuckLake) | schema inside the primary catalog that unqualified table names resolve to (default `main`) |
 | … Discover and attach all DuckLake catalogs in this database | on by default. Attaches every other DuckLake catalog in the database, one per Postgres schema |
-| … Also discover DuckLake catalogs in other databases on this server | on by default. Attaches the catalogs of every other database you can connect to, as `<database>.<schema>` |
+| … Also discover DuckLake catalogs in other databases on this server | on by default. Attaches the catalogs of every other database you can connect to |
 
 Connect, expand the lake → schema → **Tables**, and browse. To change what's hidden, see
 **Connection settings → Filters** / the navigator's *Show system objects* toggle.
@@ -79,13 +79,15 @@ many catalogs, as several schemas in one database, spread over several databases
 
 A single DuckLake connection shows all of them:
 
-- The primary catalog is the **Metadata schema (Postgres)** in the database you entered. It is
-  attached under **Catalog alias** and is the current catalog in new SQL editors.
-- Every other schema in that database that holds a DuckLake appears as its own top-level node, named
-  after the schema, e.g. `sales` or `finance`.
-- The plugin also probes every other database on the server you have `CONNECT` rights on. Their
-  catalogs appear as `<database>.<schema>`, e.g. `analytics.public`. The dot is part of the name, so
-  quote it in SQL: `SELECT * FROM "analytics.public".main.events`.
+- The primary catalog is the **Metadata schema (Postgres)** in the database you entered. It is the
+  current catalog in new SQL editors.
+- Every other schema in that database that holds a DuckLake appears as its own top-level node.
+- The plugin also probes every other database on the server you have `CONNECT` rights on and adds
+  their catalogs too.
+
+Every catalog is named `<database>.<schema>`, e.g. `ducklake_catalog.sales` or `analytics.public`, so
+the tree shows where each one lives. **Catalog alias** overrides the primary catalog's name. The dot
+is part of the name, so quote it in SQL: `SELECT * FROM "analytics.public".main.events`.
 
 Discovery runs when you connect, so reconnect to see a catalog created later. A database or catalog
 that can't be reached is skipped with a warning in DBeaver's error log. Untick both discovery options
@@ -108,16 +110,17 @@ docker compose up -d      # S3 on :9000 (console :9001), Postgres on host :5433
 
 | Postgres database | Metadata schema | Appears in DBeaver as | Tables |
 |---|---|---|---|
-| `ducklake_catalog` | `public` | `public` | `main.customers`, `main.orders` |
-| `ducklake_catalog` | `sales` | `sales` | `main.deals`, `emea.leads` |
-| `ducklake_catalog` | `finance` | `finance` | `main.invoices` |
+| `ducklake_catalog` | `public` | `ducklake_catalog.public` | `main.customers`, `main.orders` |
+| `ducklake_catalog` | `sales` | `ducklake_catalog.sales` | `main.deals`, `emea.leads` |
+| `ducklake_catalog` | `finance` | `ducklake_catalog.finance` | `main.invoices` |
 | `analytics` | `public` | `analytics.public` | `main.events` |
 | `analytics` | `ml` | `analytics.ml` | `main.features` |
 
 Make a DuckLake connection with Host `localhost`, Port `5433`, Database `ducklake_catalog` and
 User/Password `postgres`. On the storage tab set Endpoint `localhost:9000`, key and secret
 `rustfsadmin`, URL style `path`, SSL off, and leave the rest blank. All five catalogs show up. To start
-SQL editors in `sales.emea` instead, set Metadata schema `sales` and Default schema `emea`.
+SQL editors in the `emea` schema of `ducklake_catalog.sales` instead, set Metadata schema `sales` and
+Default schema `emea`.
 
 `quickstart/` shows how to get the same result with the **stock** DuckDB driver (no plugin), for
 reference.
