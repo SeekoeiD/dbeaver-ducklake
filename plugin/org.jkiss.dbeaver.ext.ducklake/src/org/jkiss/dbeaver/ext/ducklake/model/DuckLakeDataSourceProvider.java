@@ -13,7 +13,10 @@ import org.jkiss.utils.CommonUtils;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -87,8 +90,31 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
 
     /** The init file a URL from {@link #getConnectionURL} points at, or null for the plain fallback URL. */
     public static File initFileFromURL(String url) {
+        String path = initFilePath(url);
+        return path == null ? null : new File(path);
+    }
+
+    private static String initFilePath(String url) {
         Matcher m = INIT_FILE_PATTERN.matcher(url == null ? "" : url);
-        return m.find() ? new File(m.group(1)) : null;
+        return m.find() ? m.group(1) : null;
+    }
+
+    /**
+     * Copy the init file behind {@code url} to a file private to one connection profile, and return
+     * the URL of the copy. Discovery edits the init file, and profiles with identical settings but
+     * different discovery options would otherwise share (and clobber) one file. The shared original
+     * is never edited. A URL without an init file is returned unchanged.
+     */
+    public static String privateConnectionURL(String url, String connectionId) throws IOException {
+        String sharedPath = initFilePath(url);
+        if (sharedPath == null || !new File(sharedPath).isFile()) {
+            return url;
+        }
+
+        String sql = Files.readString(Path.of(sharedPath), StandardCharsets.UTF_8);
+        File own = initFile(sql, connectionId);
+        writeAtomically(own, sql);
+        return url.replace(sharedPath, own.getAbsolutePath().replace('\\', '/'));
     }
 
     private static String buildInitSql(
@@ -164,29 +190,51 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
     }
 
     private static String writeInitFile(String sql) throws IOException {
-        File f = initFile(sql);
+        File f = initFile(sql, null);
+        writeAtomically(f, sql);
+        return f.getAbsolutePath().replace('\\', '/');
+    }
+
+    /**
+     * Init files are named after a hash of their generated content, plus the owning connection's id
+     * for private copies. Connections that differ in any setting (metadata schema, default schema,
+     * credentials, ...) never share a file, even with the same alias.
+     */
+    private static File initFile(String sql, String connectionId) throws IOException {
+        File dir = new File(System.getProperty("java.io.tmpdir"), "dbeaver-ducklake");
+
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            md.update(sql.getBytes(StandardCharsets.UTF_8));
+            if (connectionId != null) {
+                md.update(("\n#" + connectionId).getBytes(StandardCharsets.UTF_8));
+            }
+
+            return new File(dir, "init-" + HexFormat.of().formatHex(md.digest(), 0, 8) + ".sql");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IOException("SHA-256 is not available", e);
+        }
+    }
+
+    /** Replace {@code f} in one step, so a DuckDB instance opening concurrently never reads half a file. */
+    private static void writeAtomically(File f, String content) throws IOException {
         File dir = f.getParentFile();
         if (!dir.exists() && !dir.mkdirs() && !dir.exists()) {
             throw new IOException("Cannot create init dir: " + dir);
         }
 
-        Files.writeString(f.toPath(), sql, StandardCharsets.UTF_8);
-        return f.getAbsolutePath().replace('\\', '/');
-    }
-
-    /**
-     * The init file is named after a hash of its generated content, so connections that differ in
-     * any setting (metadata schema, default schema, credentials, ...) never share a file, even with
-     * the same alias. Connections with identical settings share one, which is harmless.
-     */
-    private static File initFile(String sql) throws IOException {
-        File dir = new File(System.getProperty("java.io.tmpdir"), "dbeaver-ducklake");
+        Path tmp = Files.createTempFile(dir.toPath(), "init-", ".tmp");
 
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(sql.getBytes(StandardCharsets.UTF_8));
-            return new File(dir, "init-" + HexFormat.of().formatHex(digest, 0, 8) + ".sql");
-        } catch (NoSuchAlgorithmException e) {
-            throw new IOException("SHA-256 is not available", e);
+            Files.writeString(tmp, content, StandardCharsets.UTF_8);
+
+            try {
+                Files.move(tmp, f.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, f.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(tmp);
         }
     }
 
@@ -234,7 +282,20 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
             out.add(line);
         }
 
-        Files.write(f.toPath(), out, StandardCharsets.UTF_8);
+        writeAtomically(f, String.join("\n", out) + "\n");
+    }
+
+    /**
+     * Put the discovery block back if the file was regenerated without it, e.g. by a Test Connection
+     * on the same connection profile.
+     */
+    public static void restoreInitFileDiscoveries(File f, List<String> attachStatements) throws IOException {
+        if (attachStatements.isEmpty() || !f.isFile()
+            || Files.readAllLines(f.toPath(), StandardCharsets.UTF_8).contains(DISCOVERY_BEGIN)) {
+            return;
+        }
+
+        updateInitFileDiscoveries(f, attachStatements);
     }
 
     /** Quote a SQL string literal, escaping single quotes. */

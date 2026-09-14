@@ -19,6 +19,8 @@ import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
 import org.jkiss.utils.CommonUtils;
 
 import java.io.File;
+import java.io.IOException;
+import java.util.List;
 
 /**
  * DuckLake data source. Reuses the DuckDB data source, and on initialization turns off
@@ -36,10 +38,13 @@ public class DuckLakeDataSource extends DuckDBDataSource {
     private static final Log log = Log.getLog(DuckLakeDataSource.class);
 
     /**
-     * URL the provider generated for this data source. The first one is assigned while the super
+     * URL of this connection profile's private init file. The first one is assigned while the super
      * constructor opens the Main connection, so these fields deliberately have no initializers.
      */
     private volatile String generatedUrl;
+
+    /** The ATTACH statements discovery wrote into the private init file. */
+    private volatile List<String> discoveredStatements;
 
     /**
      * Set once discovery has written its ATTACH block into the init file. DBeaver asks for a
@@ -84,11 +89,29 @@ public class DuckLakeDataSource extends DuckDBDataSource {
     protected String getConnectionURL(DBPConnectionConfiguration connectionInfo) throws DBException {
         String url = discoveredInitUrl;
         if (url != null) {
+            restoreDiscoveries(url);
             return url;
         }
 
-        generatedUrl = super.getConnectionURL(connectionInfo);
+        url = super.getConnectionURL(connectionInfo);
+
+        try {
+            generatedUrl = DuckLakeDataSourceProvider.privateConnectionURL(url, getContainer().getId());
+        } catch (IOException e) {
+            log.warn("Could not create a private DuckLake init file; using the shared one", e);
+            generatedUrl = url;
+        }
+
         return generatedUrl;
+    }
+
+    private void restoreDiscoveries(String url) {
+        try {
+            DuckLakeDataSourceProvider.restoreInitFileDiscoveries(
+                DuckLakeDataSourceProvider.initFileFromURL(url), discoveredStatements);
+        } catch (IOException e) {
+            log.debug("Could not restore discovered DuckLake catalogs in the init file", e);
+        }
     }
 
     /**
@@ -142,6 +165,7 @@ public class DuckLakeDataSource extends DuckDBDataSource {
         } else {
             try {
                 DuckLakeDataSourceProvider.updateInitFileDiscoveries(initFile, result.initStatements());
+                discoveredStatements = List.copyOf(result.initStatements());
                 discoveredInitUrl = generatedUrl;
             } catch (Exception e) {
                 log.warn("Could not write discovered DuckLake catalogs to the init file", e);
