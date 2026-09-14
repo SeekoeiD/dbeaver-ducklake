@@ -18,6 +18,8 @@ import org.jkiss.dbeaver.model.impl.jdbc.JDBCExecutionContext;
 import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
 import org.jkiss.utils.CommonUtils;
 
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -100,6 +102,60 @@ public class DuckLakeDataSource extends DuckDBDataSource {
         }
 
         super.initializeContextState(monitor, context, initFrom);
+        restoreDefaultSchema(monitor, context);
+    }
+
+    /**
+     * Re-apply the Default schema. The init file already runs {@code USE "<alias>"."<schema>"}, but a
+     * context that inherits the active catalog from another one gets it through JDBC
+     * {@code setCatalog}, and DuckDB resets the schema to {@code main} when that runs. Only applies
+     * while the primary catalog is active, so a catalog picked in the editor stays as it is.
+     */
+    private void restoreDefaultSchema(DBRProgressMonitor monitor, JDBCExecutionContext context) {
+        DBPConnectionConfiguration cfg = getContainer().getActualConnectionConfiguration();
+        String defaultSchema = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DEFAULT_SCHEMA)).trim();
+
+        if (defaultSchema.isEmpty()) {
+            return;
+        }
+
+        String alias = primaryAlias(cfg);
+
+        try (JDBCSession session = context.openSession(monitor, DBCExecutionPurpose.UTIL, "Restore DuckLake default schema");
+             Statement stmt = session.createStatement()) {
+            String catalog;
+            String schema;
+
+            try (ResultSet rs = stmt.executeQuery("SELECT current_database(), current_schema()")) {
+                if (!rs.next()) {
+                    return;
+                }
+
+                catalog = rs.getString(1);
+                schema = rs.getString(2);
+            }
+
+            if (!alias.equalsIgnoreCase(catalog) || defaultSchema.equalsIgnoreCase(schema)) {
+                return;
+            }
+
+            stmt.execute("USE " + DuckLakeDataSourceProvider.id(alias) + "." + DuckLakeDataSourceProvider.id(defaultSchema));
+            log.info("Restored DuckLake default schema '" + defaultSchema + "' on " + context.getContextName()
+                + " (was '" + schema + "')");
+        } catch (Exception e) {
+            log.warn("Could not restore DuckLake default schema '" + defaultSchema + "': "
+                + DuckLakeCatalogDiscovery.redact(String.valueOf(e.getMessage())));
+        }
+    }
+
+    private static String primarySchema(DBPConnectionConfiguration cfg) {
+        return CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA))
+            ? DuckLakeConstants.DEF_METADATA_SCHEMA : cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA);
+    }
+
+    private static String primaryAlias(DBPConnectionConfiguration cfg) {
+        return CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS))
+            ? primarySchema(cfg) : cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS);
     }
 
     /**
@@ -117,11 +173,8 @@ public class DuckLakeDataSource extends DuckDBDataSource {
             return;
         }
 
-        String primarySchema = CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA))
-            ? DuckLakeConstants.DEF_METADATA_SCHEMA : cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA);
-
-        String primaryAlias = CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS))
-            ? primarySchema : cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS);
+        String primarySchema = primarySchema(cfg);
+        String primaryAlias = primaryAlias(cfg);
 
         String host = CommonUtils.notEmpty(cfg.getHostName());
         String port = CommonUtils.notEmpty(cfg.getHostPort());
