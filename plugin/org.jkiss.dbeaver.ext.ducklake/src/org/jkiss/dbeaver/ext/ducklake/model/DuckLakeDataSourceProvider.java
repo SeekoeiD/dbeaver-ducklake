@@ -22,8 +22,6 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * DuckLake data source provider. Builds the JDBC URL itself: it writes a DuckDB
@@ -40,13 +38,12 @@ import java.util.regex.Pattern;
  * default {@code public}) and makes it current, optionally with {@code ducklake.default_schema} as
  * the current schema. {@link DuckLakeDataSource} then discovers the other DuckLake catalogs on the
  * same Postgres server (other schemas of this database, and other databases) and attaches each as
- * its own top-level node — see {@link DuckLakeCatalogDiscovery}.
+ * its own top-level node — see {@link DuckLakeCatalogDiscovery}. Those are attached per execution
+ * context, never through the init file, so the file is not modified after it is written.
  */
 public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
 
     private static final Log log = Log.getLog(DuckLakeDataSourceProvider.class);
-
-    private static final Pattern INIT_FILE_PATTERN = Pattern.compile("session_init_sql_file=([^;]+)");
 
     @Override
     public String getConnectionURL(DBPDriver driver, DBPConnectionConfiguration cfg) {
@@ -86,35 +83,6 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
 
     private static String connectionURL(String initFilePath) {
         return "jdbc:duckdb:;session_init_sql_file=" + initFilePath + ";jdbc_pin_db=true;jdbc_stream_results=true;";
-    }
-
-    /** The init file a URL from {@link #getConnectionURL} points at, or null for the plain fallback URL. */
-    public static File initFileFromURL(String url) {
-        String path = initFilePath(url);
-        return path == null ? null : new File(path);
-    }
-
-    private static String initFilePath(String url) {
-        Matcher m = INIT_FILE_PATTERN.matcher(url == null ? "" : url);
-        return m.find() ? m.group(1) : null;
-    }
-
-    /**
-     * Copy the init file behind {@code url} to a file private to one connection profile, and return
-     * the URL of the copy. Discovery edits the init file, and profiles with identical settings but
-     * different discovery options would otherwise share (and clobber) one file. The shared original
-     * is never edited. A URL without an init file is returned unchanged.
-     */
-    public static String privateConnectionURL(String url, String connectionId) throws IOException {
-        String sharedPath = initFilePath(url);
-        if (sharedPath == null || !new File(sharedPath).isFile()) {
-            return url;
-        }
-
-        String sql = Files.readString(Path.of(sharedPath), StandardCharsets.UTF_8);
-        File own = initFile(sql, connectionId);
-        writeAtomically(own, sql);
-        return url.replace(sharedPath, own.getAbsolutePath().replace('\\', '/'));
     }
 
     private static String buildInitSql(
@@ -174,43 +142,52 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
     }
 
     /**
-     * Build the space-joined Postgres connection string (e.g. {@code dbname=… host=… port=… user=…
+     * Build the space-joined libpq connection string (e.g. {@code dbname=… host=… port=… user=…
      * password=…}), omitting any empty field. Shared by the init file and by the catalog-discovery
      * code so both use an identical connection string.
      */
     public static String buildPostgresConnString(String host, String port, String db, String user, String pass) {
         List<String> pg = new ArrayList<>();
-        if (!CommonUtils.isEmpty(db)) pg.add("dbname=" + db);
-        if (!CommonUtils.isEmpty(host)) pg.add("host=" + host);
-        if (!CommonUtils.isEmpty(port)) pg.add("port=" + port);
-        if (!CommonUtils.isEmpty(user)) pg.add("user=" + user);
-        if (!CommonUtils.isEmpty(pass)) pg.add("password=" + pass);
+        if (!CommonUtils.isEmpty(db)) pg.add("dbname=" + libpqValue(db));
+        if (!CommonUtils.isEmpty(host)) pg.add("host=" + libpqValue(host));
+        if (!CommonUtils.isEmpty(port)) pg.add("port=" + libpqValue(port));
+        if (!CommonUtils.isEmpty(user)) pg.add("user=" + libpqValue(user));
+        if (!CommonUtils.isEmpty(pass)) pg.add("password=" + libpqValue(pass));
 
         return String.join(" ", pg);
     }
 
+    /**
+     * Quote a libpq connection-string value that contains whitespace, a quote or a backslash, such as
+     * a database named {@code sales archive} or a password with a space. Other values stay bare, so
+     * the generated init file (and its name) doesn't change for them.
+     */
+    static String libpqValue(String value) {
+        if (value.chars().noneMatch(c -> Character.isWhitespace(c) || c == '\'' || c == '\\')) {
+            return value;
+        }
+
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'";
+    }
+
     private static String writeInitFile(String sql) throws IOException {
-        File f = initFile(sql, null);
+        File f = initFile(sql);
         writeAtomically(f, sql);
         return f.getAbsolutePath().replace('\\', '/');
     }
 
     /**
-     * Init files are named after a hash of their generated content, plus the owning connection's id
-     * for private copies. Connections that differ in any setting (metadata schema, default schema,
-     * credentials, ...) never share a file, even with the same alias.
+     * Init files are named after a hash of their generated content, so connections that differ in
+     * any setting (metadata schema, default schema, credentials, ...) never share a file, even with
+     * the same alias. Connections with identical settings share one, which is harmless because the
+     * file is never modified after it is written.
      */
-    private static File initFile(String sql, String connectionId) throws IOException {
+    private static File initFile(String sql) throws IOException {
         File dir = new File(System.getProperty("java.io.tmpdir"), "dbeaver-ducklake");
 
         try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            md.update(sql.getBytes(StandardCharsets.UTF_8));
-            if (connectionId != null) {
-                md.update(("\n#" + connectionId).getBytes(StandardCharsets.UTF_8));
-            }
-
-            return new File(dir, "init-" + HexFormat.of().formatHex(md.digest(), 0, 8) + ".sql");
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(sql.getBytes(StandardCharsets.UTF_8));
+            return new File(dir, "init-" + HexFormat.of().formatHex(digest, 0, 8) + ".sql");
         } catch (NoSuchAlgorithmException e) {
             throw new IOException("SHA-256 is not available", e);
         }
@@ -236,66 +213,6 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
         } finally {
             Files.deleteIfExists(tmp);
         }
-    }
-
-    static final String DISCOVERY_BEGIN = "-- DUCKLAKE_DISCOVERY_BEGIN";
-    static final String DISCOVERY_END = "-- DUCKLAKE_DISCOVERY_END";
-
-    /**
-     * Rewrite the generated init file so the discovered catalogs are ATTACHed by every future
-     * physical connection. DBeaver opens separate physical connections (navigator metadata, each
-     * SQL editor), and despite {@code jdbc_pin_db} they can end up on separate DuckDB instances —
-     * an ATTACH performed on one instance is invisible to the others, so the discovered ATTACH
-     * statements must live in the init file, which every new instance replays.
-     *
-     * <p>The statements go into the once-per-instance section (above the marker), inside a
-     * begin/end comment block that is replaced wholesale on each rediscovery. Only ATTACHes that
-     * succeeded during discovery are written, and all use IF NOT EXISTS, so replaying them is safe.
-     */
-    public static void updateInitFileDiscoveries(File f, List<String> attachStatements) throws IOException {
-        if (!f.isFile()) {
-            return;
-        }
-
-        List<String> out = new ArrayList<>();
-        boolean inOldBlock = false;
-
-        for (String line : Files.readAllLines(f.toPath(), StandardCharsets.UTF_8)) {
-            if (line.equals(DISCOVERY_BEGIN)) {
-                inOldBlock = true;
-                continue;
-            }
-            if (line.equals(DISCOVERY_END)) {
-                inOldBlock = false;
-                continue;
-            }
-            if (inOldBlock) {
-                continue;
-            }
-
-            if (line.equals(DuckLakeConstants.INIT_MARKER) && !attachStatements.isEmpty()) {
-                out.add(DISCOVERY_BEGIN);
-                out.addAll(attachStatements);
-                out.add(DISCOVERY_END);
-            }
-
-            out.add(line);
-        }
-
-        writeAtomically(f, String.join("\n", out) + "\n");
-    }
-
-    /**
-     * Put the discovery block back if the file was regenerated without it, e.g. by a Test Connection
-     * on the same connection profile.
-     */
-    public static void restoreInitFileDiscoveries(File f, List<String> attachStatements) throws IOException {
-        if (attachStatements.isEmpty() || !f.isFile()
-            || Files.readAllLines(f.toPath(), StandardCharsets.UTF_8).contains(DISCOVERY_BEGIN)) {
-            return;
-        }
-
-        updateInitFileDiscoveries(f, attachStatements);
     }
 
     /** Quote a SQL string literal, escaping single quotes. */

@@ -9,11 +9,13 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /**
  * Finds and ATTACHes the DuckLake catalogs hosted on a Postgres server. Works on a plain JDBC
@@ -42,6 +44,9 @@ public final class DuckLakeCatalogDiscovery {
             + "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
             + "WHERE c.relname = 'ducklake_metadata' AND c.relkind = 'r' ORDER BY 1";
 
+    /** A libpq {@code password=} value, bare or single-quoted with backslash escapes. */
+    private static final Pattern PASSWORD_PATTERN = Pattern.compile("password=(?:'(?:[^'\\\\]|\\\\.)*'|\\S+)");
+
     private static final String DATABASES_SQL =
         "SELECT datname::text FROM pg_catalog.pg_database "
             + "WHERE datallowconn AND NOT datistemplate "
@@ -50,11 +55,11 @@ public final class DuckLakeCatalogDiscovery {
     /**
      * Outcome of a discovery run.
      *
-     * @param initStatements ATTACH statements (with trailing {@code ;}) to replay from the init file
-     * @param attached       catalogs newly attached on this DuckDB instance
-     * @param warnings       catalogs or databases that were skipped, and why
+     * @param attachStatements catalog name to its ATTACH statement, for replaying on other connections
+     * @param attached         catalogs newly attached on this DuckDB instance
+     * @param warnings         catalogs or databases that were skipped, and why
      */
-    public record Result(List<String> initStatements, int attached, List<String> warnings) {
+    public record Result(Map<String, String> attachStatements, int attached, List<String> warnings) {
     }
 
     /** A catalog to attach; {@code pgConn} is null for a name that is merely reserved. */
@@ -70,7 +75,7 @@ public final class DuckLakeCatalogDiscovery {
         String primarySchema, String primaryAlias,
         boolean includeSchemas, boolean includeDatabases
     ) throws SQLException {
-        List<String> initStatements = new ArrayList<>();
+        Map<String, String> attachStatements = new LinkedHashMap<>();
         List<String> warnings = new ArrayList<>();
         int attached = 0;
 
@@ -121,7 +126,7 @@ public final class DuckLakeCatalogDiscovery {
                         }
                     } catch (SQLException e) {
                         // pg_hba rules or a missing role can still refuse a database we may CONNECT to.
-                        warnings.add("Could not probe database '" + database + "': " + e.getMessage());
+                        warnings.add("Could not probe database '" + database + "': " + redact(e.getMessage()));
                     } finally {
                         execute(con, "DETACH DATABASE IF EXISTS " + id(PROBE_ALIAS));
                     }
@@ -140,26 +145,53 @@ public final class DuckLakeCatalogDiscovery {
                     + " AS " + id(name) + " (METADATA_SCHEMA " + q(target.schema()) + ")";
 
                 if (alreadyAttached.contains(name)) {
-                    // A repeat run on the same instance: keep the statement for the init file so
-                    // other DuckDB instances (SQL editors) still get the attach.
-                    initStatements.add(attachSql + ";");
+                    // A repeat run on the same instance: keep the statement so other connections
+                    // still replay it.
+                    attachStatements.put(name, attachSql);
                     continue;
                 }
 
                 try {
                     execute(con, attachSql);
-                    initStatements.add(attachSql + ";");
+                    attachStatements.put(name, attachSql);
                     attached++;
                 } catch (SQLException e) {
                     // A catalog might be permission-restricted or on unreachable storage.
-                    warnings.add("Could not attach DuckLake catalog '" + name + "': " + e.getMessage());
+                    warnings.add("Could not attach DuckLake catalog '" + name + "': " + redact(e.getMessage()));
                 }
             }
         } finally {
             execute(con, "DETACH DATABASE IF EXISTS " + id(META_ALIAS));
         }
 
-        return new Result(initStatements, attached, warnings);
+        return new Result(attachStatements, attached, warnings);
+    }
+
+    /**
+     * Replay discovered ATTACH statements on another connection, one at a time. A catalog that has
+     * become unreachable since discovery only produces a warning, so it can't stop the connection
+     * (and with it the primary catalog) from opening.
+     */
+    public static List<String> attachBestEffort(Connection con, Map<String, String> attachStatements) {
+        List<String> warnings = new ArrayList<>();
+
+        for (Map.Entry<String, String> entry : attachStatements.entrySet()) {
+            try {
+                execute(con, entry.getValue());
+            } catch (SQLException e) {
+                warnings.add("Could not attach DuckLake catalog '" + entry.getKey() + "': " + redact(e.getMessage()));
+            }
+        }
+
+        return warnings;
+    }
+
+    /**
+     * Mask libpq passwords in a message before it is logged. DuckDB's Postgres errors repeat the whole
+     * connection string, password included.
+     */
+    public static String redact(String message) {
+        return message == null ? null : PASSWORD_PATTERN.matcher(message).replaceAll("password=***");
     }
 
     /** Add a catalog unless its name (ignoring case) is taken; a skipped catalog becomes a warning. */

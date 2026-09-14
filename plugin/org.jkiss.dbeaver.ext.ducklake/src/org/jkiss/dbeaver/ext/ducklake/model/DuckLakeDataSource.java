@@ -18,9 +18,9 @@ import org.jkiss.dbeaver.model.impl.jdbc.JDBCExecutionContext;
 import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
 import org.jkiss.utils.CommonUtils;
 
-import java.io.File;
-import java.io.IOException;
-import java.util.List;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * DuckLake data source. Reuses the DuckDB data source, and on initialization turns off
@@ -31,27 +31,18 @@ import java.util.List;
  * <p>On initialization it also discovers the other DuckLake catalogs on the same Postgres server
  * and ATTACHes each so it appears as its own top-level node: {@code <schema>} for catalogs in this
  * database ({@code ducklake.discover_schemas}), {@code <database>.<schema>} for catalogs in other
- * databases ({@code ducklake.discover_databases}). Both default on.
+ * databases ({@code ducklake.discover_databases}). Both default on. Every execution context opened
+ * afterwards (Metadata, SQL editors) replays those ATTACHes one catalog at a time.
  */
 public class DuckLakeDataSource extends DuckDBDataSource {
 
     private static final Log log = Log.getLog(DuckLakeDataSource.class);
 
     /**
-     * URL of this connection profile's private init file. The first one is assigned while the super
-     * constructor opens the Main connection, so these fields deliberately have no initializers.
+     * Catalog name to ATTACH statement, set by discovery. Null until then: the Main context opens
+     * inside the super constructor, before this field could be initialized.
      */
-    private volatile String generatedUrl;
-
-    /** The ATTACH statements discovery wrote into the private init file. */
-    private volatile List<String> discoveredStatements;
-
-    /**
-     * Set once discovery has written its ATTACH block into the init file. DBeaver asks for a
-     * connection URL for every physical connection it opens (Metadata context, SQL editors, ...), and
-     * the provider regenerates the init file on each call, which would drop the block again.
-     */
-    private volatile String discoveredInitUrl;
+    private volatile Map<String, String> discoveredAttachments;
 
     public DuckLakeDataSource(
         @NotNull DBRProgressMonitor monitor,
@@ -78,47 +69,43 @@ public class DuckLakeDataSource extends DuckDBDataSource {
         try {
             discoverCatalogs(monitor);
         } catch (Throwable t) {
-            // Discovery is best-effort; never let it break connecting.
-            log.warn("DuckLake catalog discovery failed", t);
+            // Discovery is best-effort; never let it break connecting. The message can carry the
+            // Postgres connection string, so log it redacted and without the raw exception.
+            log.warn("DuckLake catalog discovery failed: " + DuckLakeCatalogDiscovery.redact(String.valueOf(t.getMessage())));
         }
 
         super.initialize(monitor);
     }
 
+    /**
+     * Attach the discovered catalogs on each new execution context. A context can run on its own
+     * DuckDB instance, where only the init file (the primary catalog) has run. Each catalog is
+     * attached separately, so one that has become unreachable since discovery is logged and skipped
+     * instead of failing the whole connection.
+     */
     @Override
-    protected String getConnectionURL(DBPConnectionConfiguration connectionInfo) throws DBException {
-        String url = discoveredInitUrl;
-        if (url != null) {
-            restoreDiscoveries(url);
-            return url;
+    protected void initializeContextState(
+        @NotNull DBRProgressMonitor monitor,
+        @NotNull JDBCExecutionContext context,
+        JDBCExecutionContext initFrom
+    ) throws DBException {
+        Map<String, String> attachments = discoveredAttachments;
+
+        if (attachments != null && !attachments.isEmpty()) {
+            try (JDBCSession session = context.openSession(monitor, DBCExecutionPurpose.UTIL, "Attach DuckLake catalogs")) {
+                for (String warning : DuckLakeCatalogDiscovery.attachBestEffort(session, attachments)) {
+                    log.warn(warning);
+                }
+            }
         }
 
-        url = super.getConnectionURL(connectionInfo);
-
-        try {
-            generatedUrl = DuckLakeDataSourceProvider.privateConnectionURL(url, getContainer().getId());
-        } catch (IOException e) {
-            log.warn("Could not create a private DuckLake init file; using the shared one", e);
-            generatedUrl = url;
-        }
-
-        return generatedUrl;
-    }
-
-    private void restoreDiscoveries(String url) {
-        try {
-            DuckLakeDataSourceProvider.restoreInitFileDiscoveries(
-                DuckLakeDataSourceProvider.initFileFromURL(url), discoveredStatements);
-        } catch (IOException e) {
-            log.debug("Could not restore discovered DuckLake catalogs in the init file", e);
-        }
+        super.initializeContextState(monitor, context, initFrom);
     }
 
     /**
      * Discover and ATTACH the other DuckLake catalogs on the Postgres server. The ATTACHes run
-     * directly on this (metadata) connection's DuckDB instance, and are then also written into the
-     * generated init file so SQL-editor connections — which can land on separate DuckDB instances —
-     * replay them and see the same catalogs.
+     * directly on this (Main) connection's DuckDB instance; {@link #initializeContextState} replays
+     * them on every execution context opened afterwards.
      */
     private void discoverCatalogs(@NotNull DBRProgressMonitor monitor) throws Exception {
         DBPConnectionConfiguration cfg = getContainer().getActualConnectionConfiguration();
@@ -155,25 +142,10 @@ public class DuckLakeDataSource extends DuckDBDataSource {
             log.warn(warning);
         }
 
-        // DBeaver's SQL editors open separate physical connections that can land on separate
-        // DuckDB instances, where only the init file runs — so the discovered ATTACHes must be
-        // replayed from there, or queries against discovered catalogs fail to bind.
-        File initFile = DuckLakeDataSourceProvider.initFileFromURL(generatedUrl);
-
-        if (initFile == null) {
-            log.warn("No DuckLake init file to record discovered catalogs in; new connections may not see them");
-        } else {
-            try {
-                DuckLakeDataSourceProvider.updateInitFileDiscoveries(initFile, result.initStatements());
-                discoveredStatements = List.copyOf(result.initStatements());
-                discoveredInitUrl = generatedUrl;
-            } catch (Exception e) {
-                log.warn("Could not write discovered DuckLake catalogs to the init file", e);
-            }
-        }
+        discoveredAttachments = Collections.unmodifiableMap(new LinkedHashMap<>(result.attachStatements()));
 
         log.info("DuckLake discovery attached " + result.attached() + " additional catalog(s), "
-            + result.initStatements().size() + " in init file (primary '"
+            + result.attachStatements().size() + " replayed on new connections (primary '"
             + primaryAlias + "' from schema '" + primarySchema + "')");
     }
 }

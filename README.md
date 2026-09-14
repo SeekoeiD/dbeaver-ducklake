@@ -140,8 +140,9 @@ Then run `install.ps1` from `plugin/dist` (or copy the jars next to `install.ps1
   that file on every connection, so the attached catalog is visible to the navigator.
 - On connect, the data source asks Postgres through DuckDB's `postgres_query` which schemas contain a
   `ducklake_metadata` table, first in the connection's database and then in each other database. It
-  attaches every catalog it finds and adds those `ATTACH` statements to the init file. A SQL editor
-  connection can run on a separate DuckDB instance that only knows what the init file tells it.
+  attaches every catalog it finds, then repeats those `ATTACH` statements one catalog at a time on
+  each connection DBeaver opens afterwards (SQL editors can run on a separate DuckDB instance). A
+  catalog that has gone offline since is skipped with a warning instead of blocking the connection.
 - The metadata model extends DBeaver's DuckDB model. It marks `memory`/`system`/`temp` as system
   catalogs (hidden via *Show system objects = off*) and lists a lake's tables via `duckdb_tables()`.
 
