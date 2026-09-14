@@ -19,19 +19,22 @@ fi
 SRC="$(cd "$(dirname "$0")" && pwd)"
 PLUGINS="$DBEAVER/plugins"
 BI="$DBEAVER/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info"
-JARS=(org.jkiss.dbeaver.ext.ducklake_1.0.0.jar org.jkiss.dbeaver.ext.ducklake.ui_1.0.0.jar)
+VERSION=1.1.0
+JARS=(org.jkiss.dbeaver.ext.ducklake_$VERSION.jar org.jkiss.dbeaver.ext.ducklake.ui_$VERSION.jar)
 
 [[ -d "$PLUGINS" ]] || { echo "plugins/ not found under $DBEAVER" >&2; exit 1; }
 [[ -f "$BI" ]] || { echo "bundles.info not found under $DBEAVER" >&2; exit 1; }
 for j in "${JARS[@]}"; do [[ -f "$SRC/$j" ]] || { echo "Missing $j next to this script" >&2; exit 1; }; done
 
+# Remove any previously installed version first, then copy.
+rm -f "$PLUGINS"/org.jkiss.dbeaver.ext.ducklake*.jar
 for j in "${JARS[@]}"; do cp -f "$SRC/$j" "$PLUGINS/$j"; done
 
 [[ -f "$BI.orig" ]] || cp "$BI" "$BI.orig"
 grep -v '^org\.jkiss\.dbeaver\.ext\.ducklake' "$BI" > "$BI.tmp" || true
-cat >> "$BI.tmp" <<'EOF'
-org.jkiss.dbeaver.ext.ducklake,1.0.0,plugins/org.jkiss.dbeaver.ext.ducklake_1.0.0.jar,4,false
-org.jkiss.dbeaver.ext.ducklake.ui,1.0.0,plugins/org.jkiss.dbeaver.ext.ducklake.ui_1.0.0.jar,4,false
+cat >> "$BI.tmp" <<EOF
+org.jkiss.dbeaver.ext.ducklake,$VERSION,plugins/org.jkiss.dbeaver.ext.ducklake_$VERSION.jar,4,false
+org.jkiss.dbeaver.ext.ducklake.ui,$VERSION,plugins/org.jkiss.dbeaver.ext.ducklake.ui_$VERSION.jar,4,false
 EOF
 mv "$BI.tmp" "$BI"
 

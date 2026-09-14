@@ -31,7 +31,11 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
     private Text urlStyleText;
     private Button useSslCheck;
     private Text dataPathText;
+    private Text metadataSchemaText;
     private Text aliasText;
+    private Text defaultSchemaText;
+    private Button discoverCheck;
+    private Button discoverDatabasesCheck;
 
     public DuckLakeConnectionPageAdvanced() {
         setTitle("DuckLake storage");
@@ -55,7 +59,15 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
         Composite lake = UIUtils.createTitledComposite(group, "DuckLake catalog", 2);
         lake.setLayoutData(new GridData(GridData.FILL_HORIZONTAL));
         dataPathText = UIUtils.createLabelText(lake, "DATA_PATH (s3://bucket/prefix/):", "");
+        metadataSchemaText = UIUtils.createLabelText(lake, "Metadata schema (Postgres):", "");
         aliasText = UIUtils.createLabelText(lake, "Catalog alias:", "");
+        defaultSchemaText = UIUtils.createLabelText(lake, "Default schema (DuckLake):", "");
+        defaultSchemaText.setToolTipText("Schema inside the primary catalog that unqualified names resolve to. Blank = main.");
+        discoverCheck = UIUtils.createCheckbox(
+            lake, "Discover and attach all DuckLake catalogs in this database", null, true, 2);
+        discoverDatabasesCheck = UIUtils.createCheckbox(
+            lake, "Also discover DuckLake catalogs in other databases on this server",
+            "Attached as <database>.<schema>", true, 2);
 
         setControl(group);
         loadSettings();
@@ -72,7 +84,13 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
         useSslCheck.setSelection(CommonUtils.getBoolean(
             cfg.getProviderProperty(DuckLakeConstants.PROP_S3_USE_SSL), false));
         dataPathText.setText(CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DATA_PATH)));
+        metadataSchemaText.setText(CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA)));
         aliasText.setText(CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS)));
+        defaultSchemaText.setText(CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DEFAULT_SCHEMA)));
+        discoverCheck.setSelection(CommonUtils.getBoolean(
+            cfg.getProviderProperty(DuckLakeConstants.PROP_DISCOVER_SCHEMAS), true));
+        discoverDatabasesCheck.setSelection(CommonUtils.getBoolean(
+            cfg.getProviderProperty(DuckLakeConstants.PROP_DISCOVER_DATABASES), true));
     }
 
     @Override
@@ -85,7 +103,11 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
         cfg.setProviderProperty(DuckLakeConstants.PROP_S3_URL_STYLE, urlStyleText.getText().trim());
         cfg.setProviderProperty(DuckLakeConstants.PROP_S3_USE_SSL, CommonUtils.toString(useSslCheck.getSelection()));
         cfg.setProviderProperty(DuckLakeConstants.PROP_DATA_PATH, dataPathText.getText().trim());
+        cfg.setProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA, metadataSchemaText.getText().trim());
         cfg.setProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS, aliasText.getText().trim());
+        cfg.setProviderProperty(DuckLakeConstants.PROP_DEFAULT_SCHEMA, defaultSchemaText.getText().trim());
+        cfg.setProviderProperty(DuckLakeConstants.PROP_DISCOVER_SCHEMAS, CommonUtils.toString(discoverCheck.getSelection()));
+        cfg.setProviderProperty(DuckLakeConstants.PROP_DISCOVER_DATABASES, CommonUtils.toString(discoverDatabasesCheck.getSelection()));
     }
 
     @Override

@@ -47,25 +47,31 @@ services:
   # One-shot: create the S3 bucket that holds the DuckLake Parquet data
   # ----------------------------------------------------------------------
   createbucket:
-    image: minio/mc:latest
+    # minio/mc is no longer pullable from Docker Hub; the AWS CLI speaks the same S3 API.
+    image: amazon/aws-cli:latest
     container_name: ducklake-createbucket
     depends_on:
       rustfs:
         condition: service_started
+    environment:
+      AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+      AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
+      AWS_DEFAULT_REGION: us-east-1
     entrypoint: >
       /bin/sh -c "
       for i in $$(seq 1 30); do
-        mc alias set rfs http://rustfs:9000 ${RUSTFS_ACCESS_KEY:-rustfsadmin} ${RUSTFS_SECRET_KEY:-rustfsadmin} && break;
+        aws --endpoint-url http://rustfs:9000 s3 ls > /dev/null 2>&1 && break;
         echo 'waiting for rustfs...'; sleep 2;
       done &&
-      mc mb --ignore-existing rfs/${S3_BUCKET:-ducklake} &&
-      echo '--- buckets ---' && mc ls rfs
+      (aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket ${S3_BUCKET:-ducklake} 2> /dev/null ||
+       aws --endpoint-url http://rustfs:9000 s3 mb s3://${S3_BUCKET:-ducklake}) &&
+      echo '--- buckets ---' && aws --endpoint-url http://rustfs:9000 s3 ls
       "
     restart: "no"
 
   # ----------------------------------------------------------------------
-  # One-shot: create + populate the DuckLake with generic demo data,
-  # BEFORE any DBeaver connection (so tables already exist on first browse).
+  # One-shot: create + populate the demo DuckLake catalogs (several on one
+  # Postgres server), BEFORE any DBeaver connection so tables exist on first browse.
   # ----------------------------------------------------------------------
   seed:
     image: python:3.12-slim
@@ -80,5 +86,5 @@ services:
     command:
       - /bin/sh
       - -c
-      - "pip install --no-cache-dir duckdb==${DUCKDB_VERSION:-1.5.4} && python /sql/seed.py"
+      - "pip install --no-cache-dir duckdb==${DUCKDB_VERSION:-1.5.4} 'psycopg[binary]' && python /sql/seed.py"
     restart: "no"

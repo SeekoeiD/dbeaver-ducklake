@@ -33,6 +33,10 @@ foreach ($p in @($javac, $jar)) { if (-not (Test-Path $p)) { throw "Not found: $
 if (-not (Test-Path (Join-Path $DBeaverPath "plugins"))) { throw "DBeaver plugins not found (set -DBeaverPath)" }
 New-Item -ItemType Directory -Force $dist | Out-Null
 
+# Jar names carry the bundle version from the model MANIFEST (both bundles share it).
+$version = (Select-String -Path "$model\META-INF\MANIFEST.MF" -Pattern '^Bundle-Version:\s*(\S+)').Matches[0].Groups[1].Value
+Remove-Item "$dist\*.jar" -ErrorAction SilentlyContinue
+
 # --- model bundle ---
 $modelOut = Join-Path $model "target\classes"
 New-Item -ItemType Directory -Force $modelOut | Out-Null
@@ -41,15 +45,15 @@ if ($LASTEXITCODE -ne 0) { throw "model compile failed" }
 Copy-Item "$model\plugin.xml" "$modelOut\plugin.xml" -Force
 New-Item -ItemType Directory -Force "$modelOut\icons" | Out-Null
 Copy-Item "$model\icons\*.svg" "$modelOut\icons\" -Force
-& $jar --create --file "$dist\org.jkiss.dbeaver.ext.ducklake_1.0.0.jar" --manifest="$model\META-INF\MANIFEST.MF" -C $modelOut .
+& $jar --create --file "$dist\org.jkiss.dbeaver.ext.ducklake_$version.jar" --manifest="$model\META-INF\MANIFEST.MF" -C $modelOut .
 
 # --- ui bundle (needs model classes on classpath) ---
 $uiOut = Join-Path $ui "target\classes"
 New-Item -ItemType Directory -Force $uiOut | Out-Null
-& $javac --release 21 -encoding UTF-8 -cp "$cp;$modelOut" -d $uiOut (Get-ChildItem "$ui\src" -Recurse -Filter *.java).FullName
+& $javac --release 21 -encoding UTF-8 -cp "$modelOut;$cp" -d $uiOut (Get-ChildItem "$ui\src" -Recurse -Filter *.java).FullName
 if ($LASTEXITCODE -ne 0) { throw "ui compile failed" }
 Copy-Item "$ui\plugin.xml" "$uiOut\plugin.xml" -Force
-& $jar --create --file "$dist\org.jkiss.dbeaver.ext.ducklake.ui_1.0.0.jar" --manifest="$ui\META-INF\MANIFEST.MF" -C $uiOut .
+& $jar --create --file "$dist\org.jkiss.dbeaver.ext.ducklake.ui_$version.jar" --manifest="$ui\META-INF\MANIFEST.MF" -C $uiOut .
 
 Write-Host "Built:"
 Get-ChildItem $dist -Filter *.jar | ForEach-Object { Write-Host ("  " + $_.FullName + "  (" + $_.Length + " bytes)") }

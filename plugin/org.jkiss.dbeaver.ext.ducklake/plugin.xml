@@ -46,8 +46,14 @@
                         <property id="ducklake.s3.region"    label="S3 region"              type="string"  description="e.g. us-east-1 (defaults to us-east-1 if blank)"/>
                         <property id="ducklake.s3.url_style" label="S3 URL style"           type="string"  description="'path' for MinIO/RustFS-style servers; blank = provider default (vhost)"/>
                         <property id="ducklake.s3.use_ssl"   label="S3 use SSL"             type="boolean" description="On for https endpoints (AWS); off for local http"/>
-                        <property id="ducklake.data_path"    label="DuckLake DATA_PATH"     type="string"  description="Storage location, e.g. s3://bucket/prefix/ (trailing slash)"/>
-                        <property id="ducklake.alias"        label="Catalog alias"          type="string"  description="Name the DuckLake is attached as (defaults to 'lake')"/>
+                    </propertyGroup>
+                    <propertyGroup label="DuckLake catalog">
+                        <property id="ducklake.data_path"        label="DuckLake DATA_PATH"        type="string"  description="Storage location, e.g. s3://bucket/prefix/ (trailing slash). Only needed when this ATTACH creates a brand-new catalog; existing catalogs store it in their metadata."/>
+                        <property id="ducklake.metadata_schema"  label="Metadata schema (Postgres)" type="string" description="Postgres schema holding this catalog's ducklake_* metadata tables (default 'public'). Selects which DuckLake catalog is the primary attach."/>
+                        <property id="ducklake.alias"            label="Catalog alias"             type="string"  description="Name the primary DuckLake is attached as (defaults to the metadata schema name, e.g. 'public')"/>
+                        <property id="ducklake.default_schema"   label="Default schema (DuckLake)" type="string"  description="Schema inside the primary catalog that unqualified table names resolve to (each connection runs USE alias.schema). Blank = main."/>
+                        <property id="ducklake.discover_schemas" label="Discover all catalogs"     type="boolean" description="Discover and attach every DuckLake catalog in the metadata database (one per Postgres schema). Default on."/>
+                        <property id="ducklake.discover_databases" label="Discover other databases" type="boolean" description="Also probe every other database on the Postgres server you may connect to, and attach its DuckLake catalogs as '&lt;database&gt;.&lt;schema&gt;'. Default on."/>
                     </propertyGroup>
                 </provider-properties>
             </drivers>

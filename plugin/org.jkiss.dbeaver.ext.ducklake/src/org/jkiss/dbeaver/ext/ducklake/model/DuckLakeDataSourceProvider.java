@@ -14,8 +14,13 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * DuckLake data source provider. Builds the JDBC URL itself: it writes a DuckDB
@@ -27,10 +32,18 @@ import java.util.List;
  * <p>Only the values the user actually entered are used — empty fields are omitted, so this works
  * for a local S3 (RustFS/MinIO), real AWS S3 (endpoint blank → credential chain when no key), or a
  * local-filesystem lake (no S3 secret at all).
+ *
+ * <p>The init file attaches ONE primary catalog (selected by {@code ducklake.metadata_schema},
+ * default {@code public}) and makes it current, optionally with {@code ducklake.default_schema} as
+ * the current schema. {@link DuckLakeDataSource} then discovers the other DuckLake catalogs on the
+ * same Postgres server (other schemas of this database, and other databases) and attaches each as
+ * its own top-level node — see {@link DuckLakeCatalogDiscovery}.
  */
 public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
 
     private static final Log log = Log.getLog(DuckLakeDataSourceProvider.class);
+
+    private static final Pattern INIT_FILE_PATTERN = Pattern.compile("session_init_sql_file=([^;]+)");
 
     @Override
     public String getConnectionURL(DBPDriver driver, DBPConnectionConfiguration cfg) {
@@ -47,27 +60,41 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
         String s3style = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_URL_STYLE));
         boolean s3ssl = CommonUtils.getBoolean(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_USE_SSL), false);
         String dataPath = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DATA_PATH));
+
+        String metadataSchema = CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA))
+            ? DuckLakeConstants.DEF_METADATA_SCHEMA : cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA);
+
         String alias = CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS))
-            ? DuckLakeConstants.DEF_ALIAS : cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS);
+            ? metadataSchema : cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS);
+
+        String defaultSchema = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DEFAULT_SCHEMA)).trim();
 
         boolean useS3 = dataPath.startsWith("s3://") || !s3endpoint.isEmpty() || !s3key.isEmpty();
         String initSql = buildInitSql(host, port, db, user, pass,
-            useS3, s3endpoint, s3key, s3secret, s3region, s3style, s3ssl, dataPath, alias);
+            useS3, s3endpoint, s3key, s3secret, s3region, s3style, s3ssl, dataPath, alias, metadataSchema, defaultSchema);
 
         try {
-            String initFilePath = writeInitFile(initSql, host, port, db, alias);
-            return "jdbc:duckdb:;session_init_sql_file=" + initFilePath
-                + ";jdbc_pin_db=true;jdbc_stream_results=true;";
+            return connectionURL(writeInitFile(initSql));
         } catch (IOException e) {
             log.error("Failed to write DuckLake init SQL file; falling back to plain DuckDB URL", e);
             return "jdbc:duckdb:";
         }
     }
 
+    private static String connectionURL(String initFilePath) {
+        return "jdbc:duckdb:;session_init_sql_file=" + initFilePath + ";jdbc_pin_db=true;jdbc_stream_results=true;";
+    }
+
+    /** The init file a URL from {@link #getConnectionURL} points at, or null for the plain fallback URL. */
+    public static File initFileFromURL(String url) {
+        Matcher m = INIT_FILE_PATTERN.matcher(url == null ? "" : url);
+        return m.find() ? new File(m.group(1)) : null;
+    }
+
     private static String buildInitSql(
         String host, String port, String db, String user, String pass,
         boolean useS3, String s3endpoint, String s3key, String s3secret, String s3region,
-        String s3style, boolean s3ssl, String dataPath, String alias
+        String s3style, boolean s3ssl, String dataPath, String alias, String metadataSchema, String defaultSchema
     ) {
         StringBuilder b = new StringBuilder(1024);
         b.append("INSTALL ducklake; LOAD ducklake;\n");
@@ -96,42 +123,127 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
                 .append("\n);\n");
         }
 
-        List<String> pg = new ArrayList<>();
-        if (!db.isEmpty()) pg.add("dbname=" + db);
-        if (!host.isEmpty()) pg.add("host=" + host);
-        if (!port.isEmpty()) pg.add("port=" + port);
-        if (!user.isEmpty()) pg.add("user=" + user);
-        if (!pass.isEmpty()) pg.add("password=" + pass);
+        String pgConn = buildPostgresConnString(host, port, db, user, pass);
 
-        b.append("ATTACH ").append(q("ducklake:postgres:" + String.join(" ", pg)))
-            .append(" AS ").append(id(alias));
+        List<String> options = new ArrayList<>();
         if (!dataPath.isEmpty()) {
-            b.append(" (DATA_PATH ").append(q(dataPath)).append(")");
+            options.add("DATA_PATH " + q(dataPath));
         }
+        options.add("METADATA_SCHEMA " + q(metadataSchema));
+
+        b.append("ATTACH ").append(q("ducklake:postgres:" + pgConn))
+            .append(" AS ").append(id(alias))
+            .append(" (").append(String.join(", ", options)).append(")");
         b.append(";\n");
         b.append(DuckLakeConstants.INIT_MARKER).append("\n");
-        b.append("USE ").append(id(alias)).append(";\n");
+
+        // Below the marker, so every physical connection starts in the primary catalog (and schema).
+        b.append("USE ").append(id(alias));
+        if (!defaultSchema.isEmpty()) {
+            b.append(".").append(id(defaultSchema));
+        }
+
+        b.append(";\n");
         return b.toString();
     }
 
-    private static String writeInitFile(String sql, String host, String port, String db, String alias) throws IOException {
-        File dir = new File(System.getProperty("java.io.tmpdir"), "dbeaver-ducklake");
+    /**
+     * Build the space-joined Postgres connection string (e.g. {@code dbname=… host=… port=… user=…
+     * password=…}), omitting any empty field. Shared by the init file and by the catalog-discovery
+     * code so both use an identical connection string.
+     */
+    public static String buildPostgresConnString(String host, String port, String db, String user, String pass) {
+        List<String> pg = new ArrayList<>();
+        if (!CommonUtils.isEmpty(db)) pg.add("dbname=" + db);
+        if (!CommonUtils.isEmpty(host)) pg.add("host=" + host);
+        if (!CommonUtils.isEmpty(port)) pg.add("port=" + port);
+        if (!CommonUtils.isEmpty(user)) pg.add("user=" + user);
+        if (!CommonUtils.isEmpty(pass)) pg.add("password=" + pass);
+
+        return String.join(" ", pg);
+    }
+
+    private static String writeInitFile(String sql) throws IOException {
+        File f = initFile(sql);
+        File dir = f.getParentFile();
         if (!dir.exists() && !dir.mkdirs() && !dir.exists()) {
             throw new IOException("Cannot create init dir: " + dir);
         }
-        String key = Integer.toHexString((host + ":" + port + "/" + db + "#" + alias).hashCode());
-        File f = new File(dir, "init-" + key + ".sql");
+
         Files.writeString(f.toPath(), sql, StandardCharsets.UTF_8);
         return f.getAbsolutePath().replace('\\', '/');
     }
 
+    /**
+     * The init file is named after a hash of its generated content, so connections that differ in
+     * any setting (metadata schema, default schema, credentials, ...) never share a file, even with
+     * the same alias. Connections with identical settings share one, which is harmless.
+     */
+    private static File initFile(String sql) throws IOException {
+        File dir = new File(System.getProperty("java.io.tmpdir"), "dbeaver-ducklake");
+
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(sql.getBytes(StandardCharsets.UTF_8));
+            return new File(dir, "init-" + HexFormat.of().formatHex(digest, 0, 8) + ".sql");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IOException("SHA-256 is not available", e);
+        }
+    }
+
+    static final String DISCOVERY_BEGIN = "-- DUCKLAKE_DISCOVERY_BEGIN";
+    static final String DISCOVERY_END = "-- DUCKLAKE_DISCOVERY_END";
+
+    /**
+     * Rewrite the generated init file so the discovered catalogs are ATTACHed by every future
+     * physical connection. DBeaver opens separate physical connections (navigator metadata, each
+     * SQL editor), and despite {@code jdbc_pin_db} they can end up on separate DuckDB instances —
+     * an ATTACH performed on one instance is invisible to the others, so the discovered ATTACH
+     * statements must live in the init file, which every new instance replays.
+     *
+     * <p>The statements go into the once-per-instance section (above the marker), inside a
+     * begin/end comment block that is replaced wholesale on each rediscovery. Only ATTACHes that
+     * succeeded during discovery are written, and all use IF NOT EXISTS, so replaying them is safe.
+     */
+    public static void updateInitFileDiscoveries(File f, List<String> attachStatements) throws IOException {
+        if (!f.isFile()) {
+            return;
+        }
+
+        List<String> out = new ArrayList<>();
+        boolean inOldBlock = false;
+
+        for (String line : Files.readAllLines(f.toPath(), StandardCharsets.UTF_8)) {
+            if (line.equals(DISCOVERY_BEGIN)) {
+                inOldBlock = true;
+                continue;
+            }
+            if (line.equals(DISCOVERY_END)) {
+                inOldBlock = false;
+                continue;
+            }
+            if (inOldBlock) {
+                continue;
+            }
+
+            if (line.equals(DuckLakeConstants.INIT_MARKER) && !attachStatements.isEmpty()) {
+                out.add(DISCOVERY_BEGIN);
+                out.addAll(attachStatements);
+                out.add(DISCOVERY_END);
+            }
+
+            out.add(line);
+        }
+
+        Files.write(f.toPath(), out, StandardCharsets.UTF_8);
+    }
+
     /** Quote a SQL string literal, escaping single quotes. */
-    private static String q(String s) {
+    static String q(String s) {
         return "'" + (s == null ? "" : s.replace("'", "''")) + "'";
     }
 
     /** Quote a SQL identifier with double quotes. */
-    private static String id(String s) {
+    static String id(String s) {
         return "\"" + (s == null ? "" : s.replace("\"", "\"\"")) + "\"";
     }
 }
