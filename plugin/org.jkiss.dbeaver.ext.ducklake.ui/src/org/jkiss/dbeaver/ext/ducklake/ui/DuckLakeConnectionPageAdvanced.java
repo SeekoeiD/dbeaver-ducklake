@@ -49,19 +49,20 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
 
         Composite s3 = UIUtils.createTitledComposite(group, "DuckLake storage (S3)", 2);
         s3.setLayoutData(new GridData(GridData.FILL_HORIZONTAL));
-        endpointText = UIUtils.createLabelText(s3, "S3 endpoint (host:port):", "");
-        keyText = UIUtils.createLabelText(s3, "S3 access key:", "");
-        secretText = UIUtils.createLabelText(s3, "S3 secret key:", "", SWT.BORDER | SWT.PASSWORD);
-        regionText = UIUtils.createLabelText(s3, "S3 region:", "");
-        urlStyleText = UIUtils.createLabelText(s3, "S3 URL style:", "");
+        // createLabelText appends the colon itself.
+        endpointText = UIUtils.createLabelText(s3, "S3 endpoint (host:port)", "");
+        keyText = UIUtils.createLabelText(s3, "S3 access key", "");
+        secretText = UIUtils.createLabelText(s3, "S3 secret key", "", SWT.BORDER | SWT.PASSWORD);
+        regionText = UIUtils.createLabelText(s3, "S3 region", "");
+        urlStyleText = UIUtils.createLabelText(s3, "S3 URL style", "");
         useSslCheck = UIUtils.createCheckbox(s3, "Use SSL", false);
 
         Composite lake = UIUtils.createTitledComposite(group, "DuckLake catalog", 2);
         lake.setLayoutData(new GridData(GridData.FILL_HORIZONTAL));
-        dataPathText = UIUtils.createLabelText(lake, "DATA_PATH (s3://bucket/prefix/):", "");
-        metadataSchemaText = UIUtils.createLabelText(lake, "Metadata schema (Postgres):", "");
-        aliasText = UIUtils.createLabelText(lake, "Catalog alias:", "");
-        defaultSchemaText = UIUtils.createLabelText(lake, "Default schema (DuckLake):", "");
+        dataPathText = UIUtils.createLabelText(lake, "DATA_PATH (s3://bucket/prefix/)", "");
+        metadataSchemaText = UIUtils.createLabelText(lake, "Metadata schema (Postgres)", "");
+        aliasText = UIUtils.createLabelText(lake, "Catalog alias", "");
+        defaultSchemaText = UIUtils.createLabelText(lake, "Default schema (DuckLake)", "");
         defaultSchemaText.setToolTipText("Schema inside the primary catalog that unqualified names resolve to. Blank = main.");
         discoverCheck = UIUtils.createCheckbox(
             lake, "Discover and attach all DuckLake catalogs in this database", null, true, 2);

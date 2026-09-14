@@ -55,6 +55,13 @@ Uninstall with `uninstall.ps1` / `uninstall.sh` (same arguments), then restart w
 
 **Database → New Database Connection → DuckLake.**
 
+The **Main** tab points at the Postgres server that holds the DuckLake metadata. The **DuckLake
+storage** tab holds the S3 settings and the catalog options.
+
+![Main tab: Postgres host, port, database and credentials](docs/images/connection-main.png)
+
+![DuckLake storage tab: S3 settings and DuckLake catalog options](docs/images/connection-storage.png)
+
 | Field | Meaning |
 |---|---|
 | Host / Port / Database / User / Password | your **DuckLake catalog** (a Postgres database) |
@@ -88,6 +95,14 @@ A single DuckLake connection shows all of them:
 Every catalog is named `<database>.<schema>`, e.g. `ducklake_catalog.sales` or `analytics.public`, so
 the tree shows where each one lives. **Catalog alias** overrides the primary catalog's name. The dot
 is part of the name, so quote it in SQL: `SELECT * FROM "analytics.public".main.events`.
+
+Here `ducklake-local` is a DuckLake connection to the demo stack below, and `ducklake-local-catalog`
+is a plain PostgreSQL connection to the same server with **Show all databases** on. The DuckLake
+connection lists one node per catalog. The Postgres connection shows the same five catalogs from the
+storage side: each is a schema in `analytics` or `ducklake_catalog` that holds the `ducklake_*`
+metadata tables. Bold marks the active catalog, database and schema.
+
+![DuckLake catalogs next to the Postgres schemas that store them](docs/images/navigator-layouts.png)
 
 Discovery runs when you connect, so reconnect to see a catalog created later. A database or catalog
 that can't be reached is skipped with a warning in DBeaver's error log. Untick both discovery options
