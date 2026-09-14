@@ -23,9 +23,13 @@ public final class DuckLakeConstants {
     public static final String PROP_S3_USE_SSL = "ducklake.s3.use_ssl";
     public static final String PROP_DATA_PATH = "ducklake.data_path";
     public static final String PROP_LAKE_ALIAS = "ducklake.alias";
+    public static final String PROP_METADATA_SCHEMA = "ducklake.metadata_schema";
+    public static final String PROP_DEFAULT_SCHEMA = "ducklake.default_schema";
+    public static final String PROP_DISCOVER_SCHEMAS = "ducklake.discover_schemas";
+    public static final String PROP_DISCOVER_DATABASES = "ducklake.discover_databases";
 
     // Generic fallbacks only (not environment-specific).
-    public static final String DEF_ALIAS = "lake";
+    public static final String DEF_METADATA_SCHEMA = "public";
     public static final String DEF_S3_REGION = "us-east-1";
 
     /** Marker understood by the DuckDB JDBC driver's session_init_sql_file:
