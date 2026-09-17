@@ -19,9 +19,12 @@ import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
 import org.jkiss.utils.CommonUtils;
 
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -30,11 +33,17 @@ import java.util.Map;
  * {@code temp} catalogs (marked system by {@link DuckLakeGenericCatalog}) are hidden — without an
  * object filter, so the connection shows no "Filtered by settings" badge.
  *
- * <p>On initialization it also discovers the other DuckLake catalogs on the same Postgres server
- * and ATTACHes each as its own top-level node named {@code <database>.<schema>}: catalogs in this
- * database ({@code ducklake.discover_schemas}) and in other databases
- * ({@code ducklake.discover_databases}). Both default on. Every execution context opened
- * afterwards (Metadata, SQL editors) replays those ATTACHes one catalog at a time.
+ * <p>It also owns the ATTACHes. The generated init file only loads extensions and creates the S3
+ * secret, so every catalog is attached from here, one at a time, and a catalog the Postgres role
+ * cannot read becomes a warning instead of a failed connection. Discovery runs once, lazily, the
+ * first time {@link #initializeContextState} is called, which is the Main context: the ATTACHes and
+ * the {@code USE} have to happen before DBeaver reads the context's active catalog and schema, and
+ * that read is the {@code super} call at the end of the same method. Every context opened after
+ * that replays the stored ATTACH statements and the same {@code USE}.
+ *
+ * <p>Which catalogs are looked for is governed by {@code ducklake.discover_schemas} (other schemas
+ * of this database) and {@code ducklake.discover_databases} (other databases on the server), both
+ * on by default.
  */
 public class DuckLakeDataSource extends DuckDBDataSource {
 
@@ -42,9 +51,23 @@ public class DuckLakeDataSource extends DuckDBDataSource {
 
     /**
      * Catalog name to ATTACH statement, set by discovery. Null until then: the Main context opens
-     * inside the super constructor, before this field could be initialized.
+     * inside the super constructor, before this field could be initialized, so nothing here may
+     * rely on a field initializer having run.
      */
     private volatile Map<String, String> discoveredAttachments;
+
+    /** The catalog {@code USE} selects, chosen by discovery. Null until discovery has run. */
+    private volatile String activeCatalog;
+
+    /** Guarded by {@code this}: discovery must run once, however many contexts open at once. */
+    private boolean discoveryDone;
+
+    /**
+     * Why discovery failed, kept for {@link #initialize}. DBeaver only logs an exception thrown from
+     * {@link #initializeContextState} and carries on with the connection, so throwing there would
+     * leave the user with a "connected" empty DuckDB instance instead of an error dialog.
+     */
+    private volatile DBException discoveryFailure;
 
     public DuckLakeDataSource(
         @NotNull DBRProgressMonitor monitor,
@@ -68,22 +91,22 @@ public class DuckLakeDataSource extends DuckDBDataSource {
             log.debug("Could not adjust DuckLake navigator settings", t);
         }
 
-        try {
-            discoverCatalogs(monitor);
-        } catch (Throwable t) {
-            // Discovery is best-effort; never let it break connecting. The message can carry the
-            // Postgres connection string, so log it redacted and without the raw exception.
-            log.warn("DuckLake catalog discovery failed: " + DuckLakeCatalogDiscovery.redact(String.valueOf(t.getMessage())));
+        DBException failure = discoveryFailure;
+
+        if (failure != null) {
+            // Rethrown from here because this is the call DBeaver fails the connection on.
+            throw failure;
         }
 
         super.initialize(monitor);
     }
 
     /**
-     * Attach the discovered catalogs on each new execution context. A context can run on its own
-     * DuckDB instance, where only the init file (the primary catalog) has run. Each catalog is
-     * attached separately, so one that has become unreachable since discovery is logged and skipped
-     * instead of failing the whole connection.
+     * Put the catalogs in place on every execution context, before {@code super} reads the context's
+     * active catalog and schema back from the connection. The first call is the Main context and
+     * runs discovery; later contexts, which each get their own DuckDB instance, replay the ATTACH
+     * statements discovery recorded. Each catalog is attached separately, so one that has become
+     * unreachable since is logged and skipped instead of failing the whole connection.
      */
     @Override
     protected void initializeContextState(
@@ -91,35 +114,72 @@ public class DuckLakeDataSource extends DuckDBDataSource {
         @NotNull JDBCExecutionContext context,
         JDBCExecutionContext initFrom
     ) throws DBException {
-        Map<String, String> attachments = discoveredAttachments;
-
-        if (attachments != null && !attachments.isEmpty()) {
-            try (JDBCSession session = context.openSession(monitor, DBCExecutionPurpose.UTIL, "Attach DuckLake catalogs")) {
-                for (String warning : DuckLakeCatalogDiscovery.attachBestEffort(session, attachments)) {
-                    log.warn(warning);
-                }
-            }
-        }
+        prepareCatalogs(monitor, context);
 
         super.initializeContextState(monitor, context, initFrom);
         restoreDefaultSchema(monitor, context);
     }
 
     /**
-     * Re-apply the Default schema. The init file already runs {@code USE "<alias>"."<schema>"}, but a
-     * context that inherits the active catalog from another one gets it through JDBC
-     * {@code setCatalog}, and DuckDB resets the schema to {@code main} when that runs. Only applies
-     * while the primary catalog is active, so a catalog picked in the editor stays as it is.
+     * Run discovery on the first context to reach this, and replay its ATTACHes plus the same
+     * {@code USE} on every later one. Discovery is the only part that can fail the connection, and
+     * only when no catalog at all could be attached.
+     */
+    private void prepareCatalogs(@NotNull DBRProgressMonitor monitor, @NotNull JDBCExecutionContext context)
+        throws DBException {
+        DBPConnectionConfiguration cfg = getContainer().getActualConnectionConfiguration();
+        String defaultSchema = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DEFAULT_SCHEMA)).trim();
+
+        synchronized (this) {
+            if (!discoveryDone) {
+                try {
+                    discoverCatalogs(monitor, context, cfg, defaultSchema);
+                } catch (DBException e) {
+                    discoveryFailure = e;
+                    throw e;
+                } finally {
+                    discoveryDone = true;
+                }
+
+                return;
+            }
+        }
+
+        String catalog = activeCatalog;
+        Map<String, String> attachments = discoveredAttachments;
+
+        if (catalog == null || attachments == null) {
+            return;
+        }
+
+        try (JDBCSession session = context.openSession(monitor, DBCExecutionPurpose.UTIL, "Attach DuckLake catalogs")) {
+            for (String warning : DuckLakeCatalogDiscovery.attachBestEffort(session, attachments)) {
+                log.warn(warning);
+            }
+
+            for (String warning : DuckLakeCatalogDiscovery.useCatalog(session, catalog, defaultSchema)) {
+                log.warn(warning);
+            }
+        }
+    }
+
+    /**
+     * Re-apply the Default schema. {@link #prepareCatalogs} already ran
+     * {@code USE "<catalog>"."<schema>"} on this context, but a context that inherits the active
+     * catalog from another one gets it through JDBC {@code setCatalog} inside {@code super}
+     * (GenericExecutionContext.initDefaultsFrom does that whenever the catalog was detected through
+     * the JDBC API, which is how the DuckDB model detects it), and DuckDB resets the schema to
+     * {@code main} when that runs. Only applies while the discovered catalog is active, so a catalog
+     * picked in the editor stays as it is.
      */
     private void restoreDefaultSchema(DBRProgressMonitor monitor, JDBCExecutionContext context) {
         DBPConnectionConfiguration cfg = getContainer().getActualConnectionConfiguration();
         String defaultSchema = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DEFAULT_SCHEMA)).trim();
+        String alias = activeCatalog;
 
-        if (defaultSchema.isEmpty()) {
+        if (defaultSchema.isEmpty() || alias == null) {
             return;
         }
-
-        String alias = primaryAlias(cfg);
 
         try (JDBCSession session = context.openSession(monitor, DBCExecutionPurpose.UTIL, "Restore DuckLake default schema");
              Statement stmt = session.createStatement()) {
@@ -148,58 +208,63 @@ public class DuckLakeDataSource extends DuckDBDataSource {
         }
     }
 
-    private static String primarySchema(DBPConnectionConfiguration cfg) {
-        return CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA))
-            ? DuckLakeConstants.DEF_METADATA_SCHEMA : cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA);
-    }
-
-    private static String primaryAlias(DBPConnectionConfiguration cfg) {
-        return CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS))
-            ? DuckLakeDataSourceProvider.defaultAlias(cfg.getDatabaseName(), primarySchema(cfg))
-            : cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS);
-    }
-
     /**
-     * Discover and ATTACH the other DuckLake catalogs on the Postgres server. The ATTACHes run
-     * directly on this (Main) connection's DuckDB instance; {@link #initializeContextState} replays
-     * them on every execution context opened afterwards.
+     * Discover and ATTACH every DuckLake catalog on the Postgres server, then make the first one
+     * that attached current. The ATTACHes run on the context being initialized, which is the Main
+     * one; {@link #prepareCatalogs} replays them on every context opened afterwards.
+     *
+     * @throws DBException when the catalog database cannot be reached at all, or when not one
+     *                     catalog could be attached. The message carries the warnings, because the
+     *                     connection dialog is the only place the user will see them.
      */
-    private void discoverCatalogs(@NotNull DBRProgressMonitor monitor) throws Exception {
-        DBPConnectionConfiguration cfg = getContainer().getActualConnectionConfiguration();
-
+    private void discoverCatalogs(
+        @NotNull DBRProgressMonitor monitor,
+        @NotNull JDBCExecutionContext context,
+        @NotNull DBPConnectionConfiguration cfg,
+        @NotNull String defaultSchema
+    ) throws DBException {
         boolean includeSchemas = CommonUtils.getBoolean(cfg.getProviderProperty(DuckLakeConstants.PROP_DISCOVER_SCHEMAS), true);
         boolean includeDatabases = CommonUtils.getBoolean(cfg.getProviderProperty(DuckLakeConstants.PROP_DISCOVER_DATABASES), true);
 
-        if (!includeSchemas && !includeDatabases) {
-            return;
-        }
-
-        String primarySchema = primarySchema(cfg);
-        String primaryAlias = primaryAlias(cfg);
-
-        String host = CommonUtils.notEmpty(cfg.getHostName());
-        String port = CommonUtils.notEmpty(cfg.getHostPort());
-        String db = CommonUtils.notEmpty(cfg.getDatabaseName());
-
-        JDBCExecutionContext context = (JDBCExecutionContext) getDefaultInstance().getDefaultContext(monitor, true);
         DuckLakeCatalogDiscovery.Result result;
+        List<String> warnings;
 
         try (JDBCSession session = context.openSession(monitor, DBCExecutionPurpose.UTIL, "Discover DuckLake catalogs")) {
             result = DuckLakeCatalogDiscovery.discover(
-                session, host, port, db,
+                session,
+                CommonUtils.notEmpty(cfg.getHostName()),
+                CommonUtils.notEmpty(cfg.getHostPort()),
+                CommonUtils.notEmpty(cfg.getDatabaseName()),
                 CommonUtils.notEmpty(cfg.getUserName()),
                 CommonUtils.notEmpty(cfg.getUserPassword()),
-                primarySchema, primaryAlias, includeSchemas, includeDatabases);
+                CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA)),
+                CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS)),
+                CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DATA_PATH)),
+                includeSchemas, includeDatabases);
+
+            warnings = new ArrayList<>(result.warnings());
+
+            if (result.activeCatalog() != null) {
+                warnings.addAll(DuckLakeCatalogDiscovery.useCatalog(session, result.activeCatalog(), defaultSchema));
+            }
+        } catch (SQLException e) {
+            // The message can carry the Postgres connection string, password included.
+            throw new DBException("DuckLake catalog discovery failed: "
+                + DuckLakeCatalogDiscovery.redact(String.valueOf(e.getMessage())));
         }
 
-        for (String warning : result.warnings()) {
+        for (String warning : warnings) {
             log.warn(warning);
         }
 
-        discoveredAttachments = Collections.unmodifiableMap(new LinkedHashMap<>(result.attachStatements()));
+        if (result.activeCatalog() == null) {
+            throw new DBException("No DuckLake catalog could be attached.\n" + String.join("\n", warnings));
+        }
 
-        log.info("DuckLake discovery attached " + result.attached() + " additional catalog(s), "
-            + result.attachStatements().size() + " replayed on new connections (primary '"
-            + primaryAlias + "' from schema '" + primarySchema + "')");
+        discoveredAttachments = Collections.unmodifiableMap(new LinkedHashMap<>(result.attachStatements()));
+        activeCatalog = result.activeCatalog();
+
+        log.info("DuckLake active catalog '" + result.activeCatalog() + "', " + result.attached()
+            + " catalog(s) attached, " + result.skipped() + " skipped");
     }
 }

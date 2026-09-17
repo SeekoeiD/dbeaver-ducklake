@@ -25,21 +25,21 @@ import java.util.List;
 
 /**
  * DuckLake data source provider. Builds the JDBC URL itself: it writes a DuckDB
- * {@code session_init_sql_file} that loads the extensions, creates an S3 secret (only if S3 storage
- * is used) and ATTACHes the DuckLake, then returns a {@code jdbc:duckdb:} URL referencing that file.
- * Because the DuckDB driver runs the init file on every physical connection (SQL editor and the
- * navigator's metadata connection), the attached catalog and its tables reliably appear in the tree.
+ * {@code session_init_sql_file} that loads the extensions and creates an S3 secret (only if S3
+ * storage is used), then returns a {@code jdbc:duckdb:} URL referencing that file. The DuckDB
+ * driver runs the file on every physical connection (SQL editor and the navigator's metadata
+ * connection), so every connection has the extensions and the secret in place.
  *
  * <p>Only the values the user actually entered are used — empty fields are omitted, so this works
  * for a local S3 (RustFS/MinIO), real AWS S3 (endpoint blank → credential chain when no key), or a
  * local-filesystem lake (no S3 secret at all).
  *
- * <p>The init file attaches ONE primary catalog (selected by {@code ducklake.metadata_schema},
- * default {@code public}) and makes it current, optionally with {@code ducklake.default_schema} as
- * the current schema. {@link DuckLakeDataSource} then discovers the other DuckLake catalogs on the
- * same Postgres server (other schemas of this database, and other databases) and attaches each as
- * its own top-level node — see {@link DuckLakeCatalogDiscovery}. Those are attached per execution
- * context, never through the init file, so the file is not modified after it is written.
+ * <p>The init file deliberately contains no ATTACH and no USE. A statement that fails in the init
+ * file fails the whole connection, and a catalog the Postgres role cannot read is exactly the case
+ * that must not do that. So every catalog, the primary one included, is attached one at a time by
+ * {@link DuckLakeCatalogDiscovery} from {@link DuckLakeDataSource}, where a failure becomes a
+ * warning instead. That also means a connection with nothing filled in under "DuckLake catalog"
+ * still opens: discovery picks the first catalog the role can actually read.
  */
 public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
 
@@ -47,12 +47,6 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
 
     @Override
     public String getConnectionURL(DBPDriver driver, DBPConnectionConfiguration cfg) {
-        String host = CommonUtils.notEmpty(cfg.getHostName());
-        String port = CommonUtils.notEmpty(cfg.getHostPort());
-        String db = CommonUtils.notEmpty(cfg.getDatabaseName());
-        String user = CommonUtils.notEmpty(cfg.getUserName());
-        String pass = CommonUtils.notEmpty(cfg.getUserPassword());
-
         String s3endpoint = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_ENDPOINT));
         String s3key = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_KEY));
         String s3secret = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_SECRET));
@@ -61,17 +55,8 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
         boolean s3ssl = CommonUtils.getBoolean(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_USE_SSL), false);
         String dataPath = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DATA_PATH));
 
-        String metadataSchema = CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA))
-            ? DuckLakeConstants.DEF_METADATA_SCHEMA : cfg.getProviderProperty(DuckLakeConstants.PROP_METADATA_SCHEMA);
-
-        String alias = CommonUtils.isEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS))
-            ? defaultAlias(db, metadataSchema) : cfg.getProviderProperty(DuckLakeConstants.PROP_LAKE_ALIAS);
-
-        String defaultSchema = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DEFAULT_SCHEMA)).trim();
-
         boolean useS3 = dataPath.startsWith("s3://") || !s3endpoint.isEmpty() || !s3key.isEmpty();
-        String initSql = buildInitSql(host, port, db, user, pass,
-            useS3, s3endpoint, s3key, s3secret, s3region, s3style, s3ssl, dataPath, alias, metadataSchema, defaultSchema);
+        String initSql = buildInitSql(useS3, s3endpoint, s3key, s3secret, s3region, s3style, s3ssl);
 
         try {
             return connectionURL(writeInitFile(initSql));
@@ -94,12 +79,21 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
         return CommonUtils.isEmpty(db) ? metadataSchema : db + "." + metadataSchema;
     }
 
+    /**
+     * The whole init file: load the extensions every DuckLake connection needs and, when the lake
+     * lives on S3, create the secret that reads it. Nothing here can fail because of a Postgres
+     * permission or a stale DATA_PATH, which is why the ATTACH and the USE live in
+     * {@link DuckLakeCatalogDiscovery} instead.
+     *
+     * <p>There is no {@code DUCKDB_CONNECTION_INIT_BELOW_MARKER}: for an in-memory database
+     * ({@code jdbc:duckdb:} with no path) the DuckDB driver runs the part above the marker on every
+     * connection anyway, and INSTALL / LOAD / CREATE OR REPLACE SECRET are all idempotent.
+     */
     private static String buildInitSql(
-        String host, String port, String db, String user, String pass,
-        boolean useS3, String s3endpoint, String s3key, String s3secret, String s3region,
-        String s3style, boolean s3ssl, String dataPath, String alias, String metadataSchema, String defaultSchema
+        boolean useS3, String s3endpoint, String s3key, String s3secret,
+        String s3region, String s3style, boolean s3ssl
     ) {
-        StringBuilder b = new StringBuilder(1024);
+        StringBuilder b = new StringBuilder(512);
         b.append("INSTALL ducklake; LOAD ducklake;\n");
         b.append("INSTALL postgres; LOAD postgres;\n");
         if (useS3) {
@@ -126,27 +120,6 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
                 .append("\n);\n");
         }
 
-        String pgConn = buildPostgresConnString(host, port, db, user, pass);
-
-        List<String> options = new ArrayList<>();
-        if (!dataPath.isEmpty()) {
-            options.add("DATA_PATH " + q(dataPath));
-        }
-        options.add("METADATA_SCHEMA " + q(metadataSchema));
-
-        b.append("ATTACH ").append(q("ducklake:postgres:" + pgConn))
-            .append(" AS ").append(id(alias))
-            .append(" (").append(String.join(", ", options)).append(")");
-        b.append(";\n");
-        b.append(DuckLakeConstants.INIT_MARKER).append("\n");
-
-        // Below the marker, so every physical connection starts in the primary catalog (and schema).
-        b.append("USE ").append(id(alias));
-        if (!defaultSchema.isEmpty()) {
-            b.append(".").append(id(defaultSchema));
-        }
-
-        b.append(";\n");
         return b.toString();
     }
 
@@ -187,9 +160,9 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
 
     /**
      * Init files are named after a hash of their generated content, so connections that differ in
-     * any setting (metadata schema, default schema, credentials, ...) never share a file, even with
-     * the same alias. Connections with identical settings share one, which is harmless because the
-     * file is never modified after it is written.
+     * any S3 setting never share a file. Connections whose storage settings match share one, which
+     * is harmless: the file is never modified after it is written, and it no longer holds anything
+     * specific to one catalog.
      */
     private static File initFile(String sql) throws IOException {
         File dir = new File(System.getProperty("java.io.tmpdir"), "dbeaver-ducklake");
