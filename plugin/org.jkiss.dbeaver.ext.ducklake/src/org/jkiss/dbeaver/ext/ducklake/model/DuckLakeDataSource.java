@@ -62,6 +62,13 @@ public class DuckLakeDataSource extends DuckDBDataSource {
     /** Guarded by {@code this}: discovery must run once, however many contexts open at once. */
     private boolean discoveryDone;
 
+    /**
+     * Why discovery failed, kept for {@link #initialize}. DBeaver only logs an exception thrown from
+     * {@link #initializeContextState} and carries on with the connection, so throwing there would
+     * leave the user with a "connected" empty DuckDB instance instead of an error dialog.
+     */
+    private volatile DBException discoveryFailure;
+
     public DuckLakeDataSource(
         @NotNull DBRProgressMonitor monitor,
         @NotNull DBPDataSourceContainer container,
@@ -82,6 +89,13 @@ public class DuckLakeDataSource extends DuckDBDataSource {
         } catch (Throwable t) {
             // Never let this cosmetic setting break connecting.
             log.debug("Could not adjust DuckLake navigator settings", t);
+        }
+
+        DBException failure = discoveryFailure;
+
+        if (failure != null) {
+            // Rethrown from here because this is the call DBeaver fails the connection on.
+            throw failure;
         }
 
         super.initialize(monitor);
@@ -118,8 +132,15 @@ public class DuckLakeDataSource extends DuckDBDataSource {
 
         synchronized (this) {
             if (!discoveryDone) {
-                discoverCatalogs(monitor, context, cfg, defaultSchema);
-                discoveryDone = true;
+                try {
+                    discoverCatalogs(monitor, context, cfg, defaultSchema);
+                } catch (DBException e) {
+                    discoveryFailure = e;
+                    throw e;
+                } finally {
+                    discoveryDone = true;
+                }
+
                 return;
             }
         }

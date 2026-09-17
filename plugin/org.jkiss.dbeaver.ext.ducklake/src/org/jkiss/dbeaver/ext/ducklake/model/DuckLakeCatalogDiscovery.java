@@ -142,23 +142,55 @@ public final class DuckLakeCatalogDiscovery {
             warnings.add("Ignored the catalog alias '" + alias + "': it is a DuckDB built-in database name");
             alias = "";
         }
-        String pgConn = DuckLakeDataSourceProvider.buildPostgresConnString(host, port, db, user, pass);
 
-        try {
-            execute(con, "ATTACH IF NOT EXISTS " + q(pgConn) + " AS " + id(META_ALIAS) + " (TYPE POSTGRES, READ_ONLY)");
-        } catch (SQLException e) {
-            // Nothing below can work without this one, so it is the only fatal failure here.
-            throw new SQLException("Cannot open the DuckLake catalog database: " + redact(e.getMessage()));
+        String pgConn = DuckLakeDataSourceProvider.buildPostgresConnString(host, port, db, user, pass);
+        String activeAlias = alias;
+
+        return inAutoCommit(con, () -> {
+            try {
+                execute(con, "ATTACH IF NOT EXISTS " + q(pgConn) + " AS " + id(META_ALIAS) + " (TYPE POSTGRES, READ_ONLY)");
+            } catch (SQLException e) {
+                // Nothing below can work without this one, so it is the only fatal failure here.
+                throw new SQLException("Cannot open the DuckLake catalog database: " + redact(e.getMessage()));
+            }
+
+            try {
+                List<Candidate> candidates = collectCandidates(
+                    con, pgConn, host, port, db, user, pass, preferredSchema, path,
+                    includeSchemas, includeDatabases, warnings);
+
+                return attachAll(con, candidates, path, activeAlias, warnings);
+            } finally {
+                execute(con, "DETACH DATABASE IF EXISTS " + id(META_ALIAS));
+            }
+        });
+    }
+
+    /** A unit of discovery work that must run outside any open transaction. */
+    private interface AutoCommitWork<T> {
+        T run() throws SQLException;
+    }
+
+    /**
+     * Run {@code work} with auto-commit on, then put the connection's previous mode back. DBeaver
+     * turns auto-commit off before the context is initialized when the connection type says so
+     * (manual commit), and DuckDB aborts the whole transaction on the first failed statement.
+     * Inside such a transaction a catalog that fails to attach would take every later ATTACH, and
+     * even the cleanup DETACH, down with it, which defeats attaching them one at a time.
+     */
+    private static <T> T inAutoCommit(Connection con, AutoCommitWork<T> work) throws SQLException {
+        boolean autoCommit = con.getAutoCommit();
+
+        if (autoCommit) {
+            return work.run();
         }
 
-        try {
-            List<Candidate> candidates = collectCandidates(
-                con, pgConn, host, port, db, user, pass, preferredSchema, path,
-                includeSchemas, includeDatabases, warnings);
+        con.setAutoCommit(true);
 
-            return attachAll(con, candidates, path, alias, warnings);
+        try {
+            return work.run();
         } finally {
-            execute(con, "DETACH DATABASE IF EXISTS " + id(META_ALIAS));
+            con.setAutoCommit(false);
         }
     }
 
@@ -367,20 +399,28 @@ public final class DuckLakeCatalogDiscovery {
         List<String> warnings = new ArrayList<>();
         String schema = trimmed(defaultSchema);
 
-        if (!schema.isEmpty()) {
-            try {
-                execute(con, "USE " + id(catalog) + "." + id(schema));
-                return warnings;
-            } catch (SQLException e) {
-                warnings.add("Could not open DuckLake schema '" + schema + "' of catalog '" + catalog
-                    + "'; staying in the catalog's own default schema: " + redact(e.getMessage()));
-            }
-        }
-
         try {
-            execute(con, "USE " + id(catalog));
+            inAutoCommit(con, () -> {
+                if (!schema.isEmpty()) {
+                    try {
+                        execute(con, "USE " + id(catalog) + "." + id(schema));
+                        return null;
+                    } catch (SQLException e) {
+                        warnings.add("Could not open DuckLake schema '" + schema + "' of catalog '" + catalog
+                            + "'; staying in the catalog's own default schema: " + redact(e.getMessage()));
+                    }
+                }
+
+                try {
+                    execute(con, "USE " + id(catalog));
+                } catch (SQLException e) {
+                    warnings.add("Could not make DuckLake catalog '" + catalog + "' the current one: " + redact(e.getMessage()));
+                }
+
+                return null;
+            });
         } catch (SQLException e) {
-            warnings.add("Could not make DuckLake catalog '" + catalog + "' the current one: " + redact(e.getMessage()));
+            warnings.add("Could not switch auto-commit to select DuckLake catalog '" + catalog + "': " + redact(e.getMessage()));
         }
 
         return warnings;
@@ -394,12 +434,20 @@ public final class DuckLakeCatalogDiscovery {
     public static List<String> attachBestEffort(Connection con, Map<String, String> attachStatements) {
         List<String> warnings = new ArrayList<>();
 
-        for (Map.Entry<String, String> entry : attachStatements.entrySet()) {
-            try {
-                execute(con, entry.getValue());
-            } catch (SQLException e) {
-                warnings.add("Could not attach DuckLake catalog '" + entry.getKey() + "': " + redact(e.getMessage()));
-            }
+        try {
+            inAutoCommit(con, () -> {
+                for (Map.Entry<String, String> entry : attachStatements.entrySet()) {
+                    try {
+                        execute(con, entry.getValue());
+                    } catch (SQLException e) {
+                        warnings.add("Could not attach DuckLake catalog '" + entry.getKey() + "': " + redact(e.getMessage()));
+                    }
+                }
+
+                return null;
+            });
+        } catch (SQLException e) {
+            warnings.add("Could not switch auto-commit to attach the DuckLake catalogs: " + redact(e.getMessage()));
         }
 
         return warnings;

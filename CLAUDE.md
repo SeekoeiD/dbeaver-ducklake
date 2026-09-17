@@ -56,6 +56,13 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
   `main`. That last part is why `restoreDefaultSchema` still exists.
 - Every later execution context replays the stored ATTACH statements one at a time, logs a warning
   for each that fails, and runs the same USE.
+- DBeaver only logs a DBException thrown from `initializeContextState` ("Error while initializing
+  context state") and keeps the connection. So a discovery failure is stored in `discoveryFailure`
+  and rethrown from `initialize`, which `DataSourceDescriptor.openDataSource` does propagate.
+- Every ATTACH/USE runs with auto-commit forced on (`inAutoCommit` in discovery) and the previous
+  mode restored after. DBeaver switches auto-commit off before `initializeContextState` for
+  manual-commit connection types, and DuckDB aborts the whole transaction on the first failed
+  statement, which would take every later ATTACH down with the first unreadable catalog.
 - DATA_PATH is only offered to the preferred primary, and an ATTACH that fails with "does not match
   existing data path" is retried without it plus a warning. Never use OVERRIDE_DATA_PATH: it rewrites
   the catalog instead of reading it.
