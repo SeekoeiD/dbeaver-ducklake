@@ -19,8 +19,12 @@ import org.jkiss.dbeaver.ui.dialogs.connection.ConnectionPageAbstract;
 import org.jkiss.utils.CommonUtils;
 
 /**
- * Extra "DuckLake storage" tab: S3 endpoint/credentials + DATA_PATH + catalog alias,
- * all stored as connection provider properties (read back when building the ATTACH).
+ * Extra "DuckLake storage" tab: S3 endpoint/credentials + DATA_PATH + catalog alias, all stored as
+ * connection provider properties (read back when building the ATTACH).
+ *
+ * <p>Nothing on this tab is required. Leaving the whole "DuckLake catalog" group blank is a normal
+ * setup: the plugin then attaches every catalog the Postgres role can read and makes the first one
+ * active. The fields only override that, which is what the tooltips say.
  */
 public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
 
@@ -57,13 +61,24 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
         urlStyleText = UIUtils.createLabelText(s3, "S3 URL style", "");
         useSslCheck = UIUtils.createCheckbox(s3, "Use SSL", false);
 
-        Composite lake = UIUtils.createTitledComposite(group, "DuckLake catalog", 2);
+        // Every field here is optional: with all four blank the plugin attaches whatever the
+        // Postgres role can read and makes the first of those the active catalog.
+        Composite lake = UIUtils.createTitledComposite(group, "DuckLake catalog (all optional)", 2);
         lake.setLayoutData(new GridData(GridData.FILL_HORIZONTAL));
         dataPathText = UIUtils.createLabelText(lake, "DATA_PATH (s3://bucket/prefix/)", "");
+        dataPathText.setToolTipText("Leave blank to browse existing catalogs. Setting it is what CREATES a"
+            + " catalog in the Metadata schema when that schema has none. An existing catalog stores its own"
+            + " storage location, and a value that does not match it is ignored with a warning.");
         metadataSchemaText = UIUtils.createLabelText(lake, "Metadata schema (Postgres)", "");
+        metadataSchemaText.setToolTipText("Preferred primary catalog: the Postgres schema holding its ducklake_*"
+            + " tables. Blank tries 'public' first, then the other readable catalogs. A schema the role cannot"
+            + " read, or that holds no catalog, is skipped with a warning; nothing is created there unless"
+            + " DATA_PATH is set.");
         aliasText = UIUtils.createLabelText(lake, "Catalog alias", "");
+        aliasText.setToolTipText("Name for the catalog that ends up active. Blank = <database>.<schema>.");
         defaultSchemaText = UIUtils.createLabelText(lake, "Default schema (DuckLake)", "");
-        defaultSchemaText.setToolTipText("Schema inside the primary catalog that unqualified names resolve to. Blank = main.");
+        defaultSchemaText.setToolTipText("Schema inside the active catalog that unqualified names resolve to."
+            + " Blank = main. A schema that does not exist only costs a warning.");
         discoverCheck = UIUtils.createCheckbox(
             lake, "Discover and attach all DuckLake catalogs in this database", null, true, 2);
         discoverDatabasesCheck = UIUtils.createCheckbox(

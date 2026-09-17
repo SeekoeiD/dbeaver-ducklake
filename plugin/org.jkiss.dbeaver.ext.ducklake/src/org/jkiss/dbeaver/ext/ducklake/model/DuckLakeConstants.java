@@ -29,12 +29,11 @@ public final class DuckLakeConstants {
     public static final String PROP_DISCOVER_DATABASES = "ducklake.discover_databases";
 
     // Generic fallbacks only (not environment-specific).
-    public static final String DEF_METADATA_SCHEMA = "public";
-    public static final String DEF_S3_REGION = "us-east-1";
 
-    /** Marker understood by the DuckDB JDBC driver's session_init_sql_file:
-     *  statements above run once per DB instance, statements below run on every connection. */
-    public static final String INIT_MARKER = "/* DUCKDB_CONNECTION_INIT_BELOW_MARKER */";
+    /** First catalog tried when "Metadata schema" is blank; DuckDB's own METADATA_SCHEMA default. */
+    public static final String DEF_METADATA_SCHEMA = "public";
+
+    public static final String DEF_S3_REGION = "us-east-1";
 
     private DuckLakeConstants() {
     }

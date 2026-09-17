@@ -9,9 +9,12 @@ It's built on top of DBeaver's bundled DuckDB support and adds:
 - A dedicated **DuckLake** driver/connection type (with the DuckLake icon).
 - A connection page: standard **Host/Port/Database/User/Password** for the **catalog** database
   (Postgres), plus a **DuckLake storage (S3)** tab for the object store.
-- **Reliable table browsing** — the plugin generates a DuckDB `session_init_sql_file` so the
-  `ATTACH` runs on *every* physical connection (SQL editor **and** the navigator's metadata
-  connection). This is the fix for the well-known "DuckLake tables don't show up in DBeaver" problem.
+- **Reliable table browsing** — the plugin re-runs the `ATTACH` on *every* physical connection (SQL
+  editor **and** the navigator's metadata connection). This is the fix for the well-known "DuckLake
+  tables don't show up in DBeaver" problem.
+- **Best-effort attaching** — each catalog is attached on its own, so one your Postgres role cannot
+  read is skipped with a warning instead of killing the connection. Leaving the whole **DuckLake
+  catalog** group blank is a normal setup, not a broken one.
 - A clean tree — DuckDB's internal `memory`/`system`/`temp` databases are hidden, leaving just your
   lake(s).
 
@@ -68,12 +71,15 @@ storage** tab holds the S3 settings and the catalog options.
 | DuckLake storage (S3) → Endpoint | e.g. `localhost:9000`, or blank for AWS default |
 | … Access key / Secret key | S3 credentials (blank key → AWS credential chain) |
 | … Region / URL style / Use SSL | `path` style for MinIO/RustFS; SSL on for https endpoints |
-| … DATA_PATH | storage location, e.g. `s3://bucket/prefix/` (only needed when the ATTACH creates a brand-new catalog; existing catalogs store it in their metadata) |
-| DuckLake catalog → Metadata schema (Postgres) | Postgres schema holding the **primary** catalog's `ducklake_*` metadata tables (default `public`) |
-| … Catalog alias | name the primary catalog is attached as (defaults to `<database>.<metadata schema>`, e.g. `ducklake_catalog.public`) |
-| … Default schema (DuckLake) | schema inside the primary catalog that unqualified table names resolve to (default `main`) |
-| … Discover and attach all DuckLake catalogs in this database | on by default. Attaches every other DuckLake catalog in the database, one per Postgres schema |
+| … DATA_PATH | storage location, e.g. `s3://bucket/prefix/`. Leave blank to browse. Setting it is what **creates** a catalog in the Metadata schema when that schema has none. A value that disagrees with an existing catalog's own location is dropped with a warning |
+| DuckLake catalog → Metadata schema (Postgres) | the Postgres schema whose catalog you want **active**. Blank tries `public` first, then the other readable catalogs. A schema with no catalog in it is skipped with a warning |
+| … Catalog alias | name for whichever catalog ends up active (defaults to `<database>.<schema>`, e.g. `ducklake_catalog.public`) |
+| … Default schema (DuckLake) | schema inside the active catalog that unqualified table names resolve to (default `main`) |
+| … Discover and attach all DuckLake catalogs in this database | on by default. Attaches every DuckLake catalog in the database, one per Postgres schema. Off attaches only the Metadata schema one |
 | … Also discover DuckLake catalogs in other databases on this server | on by default. Attaches the catalogs of every other database you can connect to |
+
+Everything in the **DuckLake catalog** group is optional. Leave all four fields blank and the plugin
+attaches every catalog your Postgres role can read, then starts you in the first of them.
 
 Connect, expand the lake → schema → **Tables**, and browse. To change what's hidden, see
 **Connection settings → Filters** / the navigator's *Show system objects* toggle.
@@ -86,15 +92,27 @@ many catalogs, as several schemas in one database, spread over several databases
 
 A single DuckLake connection shows all of them:
 
-- The primary catalog is the **Metadata schema (Postgres)** in the database you entered. It is the
-  current catalog in new SQL editors.
-- Every other schema in that database that holds a DuckLake appears as its own top-level node.
+- Every schema in the database you entered that holds a DuckLake appears as its own top-level node.
 - The plugin also probes every other database on the server you have `CONNECT` rights on and adds
   their catalogs too.
+- Each one is attached separately. A catalog your role cannot read is skipped with a warning in
+  DBeaver's error log, and the rest still show up.
+
+One of them is the **active** catalog, the one new SQL editors start in. The plugin tries the
+**Metadata schema (Postgres)** you entered first, or `public` when that field is blank, then the
+remaining schemas of your database in alphabetical order, then the other databases. The first one
+that attaches wins. So a read-only role that can read `bronze` and `silver` but not `public` ends up
+in `bronze`, with a warning about `public`, rather than failing to connect.
+
+Only schemas that already contain a DuckLake are attached. DuckLake's `ATTACH` creates a catalog when
+the schema has none, so a typo in **Metadata schema**, or a blank field on a server whose catalogs
+live elsewhere, would otherwise leave an empty catalog behind. You get a warning and the next
+candidate instead. Filling in **DATA_PATH** is the one way to say you do want a catalog created
+there.
 
 Every catalog is named `<database>.<schema>`, e.g. `ducklake_catalog.sales` or `analytics.public`, so
-the tree shows where each one lives. **Catalog alias** overrides the primary catalog's name. The dot
-is part of the name, so quote it in SQL: `SELECT * FROM "analytics.public".main.events`.
+the tree shows where each one lives. **Catalog alias** renames whichever catalog ends up active. The
+dot is part of the name, so quote it in SQL: `SELECT * FROM "analytics.public".main.events`.
 
 Here `ducklake-local` is a DuckLake connection to the demo stack below, and `ducklake-local-catalog`
 is a plain PostgreSQL connection to the same server with **Show all databases** on. The DuckLake
@@ -104,13 +122,13 @@ metadata tables. Bold marks the active catalog, database and schema.
 
 ![DuckLake catalogs next to the Postgres schemas that store them](docs/images/navigator-layouts.png)
 
-Discovery runs when you connect, so reconnect to see a catalog created later. A database or catalog
-that can't be reached is skipped with a warning in DBeaver's error log. Untick both discovery options
-to mount only the primary catalog.
+Discovery runs when you connect, so reconnect to see a catalog created later. Untick both discovery
+options to mount only the **Metadata schema** catalog. Connecting fails only when not one catalog
+could be attached, and the error dialog then lists every reason.
 
-**Default schema (DuckLake)** makes every connection start in that schema of the primary catalog. The
-plugin runs `USE "<alias>"."<schema>"` on each connection, so `SELECT * FROM leads` works without a
-prefix. If the schema doesn't exist, connecting fails with `No catalog + schema named ...`. Picking
+**Default schema (DuckLake)** makes every connection start in that schema of the active catalog. The
+plugin runs `USE "<catalog>"."<schema>"` on each connection, so `SELECT * FROM leads` works without a
+prefix. If the schema doesn't exist you get a warning and the catalog's own default schema. Picking
 another catalog in DBeaver's active catalog selector puts you in that catalog's `main` schema.
 
 ## Try it locally (optional demo stack)
@@ -153,14 +171,21 @@ Then run `install.ps1` from `plugin/dist` (or copy the jars next to `install.ps1
 ## How it works
 
 - The datasource extends DBeaver's `GenericDataSourceProvider`; `getConnectionURL` writes a
-  `session_init_sql_file` (INSTALL/LOAD extensions → `CREATE SECRET` → `ATTACH 'ducklake:postgres:…'`
-  → `USE`) and returns `jdbc:duckdb:;session_init_sql_file=…;jdbc_pin_db=true`. The DuckDB driver runs
-  that file on every connection, so the attached catalog is visible to the navigator.
-- On connect, the data source asks Postgres through DuckDB's `postgres_query` which schemas contain a
-  `ducklake_metadata` table, first in the connection's database and then in each other database. It
-  attaches every catalog it finds, then repeats those `ATTACH` statements one catalog at a time on
-  each connection DBeaver opens afterwards (SQL editors can run on a separate DuckDB instance). A
-  catalog that has gone offline since is skipped with a warning instead of blocking the connection.
+  `session_init_sql_file` (INSTALL/LOAD extensions, then `CREATE SECRET` when the lake is on S3) and
+  returns `jdbc:duckdb:;session_init_sql_file=…;jdbc_pin_db=true`. The DuckDB driver runs that file
+  on every connection.
+- The file holds no `ATTACH` and no `USE` on purpose. A statement that fails there fails the whole
+  connection, with nothing able to catch it, and a catalog the Postgres role cannot read is exactly
+  the case that must not do that.
+- The `ATTACH`es happen from the data source instead, on the first execution context DBeaver opens.
+  It asks Postgres through DuckDB's `postgres_query` which schemas contain a `ducklake_metadata`
+  table, first in the connection's database and then in each other database, then attaches each
+  catalog it finds inside its own try/catch and runs `USE` on the first one that worked. The one
+  statement that has to succeed is the read-only Postgres passthrough the probing runs through:
+  if that fails, the host or the credentials are wrong.
+- Each later connection DBeaver opens (SQL editors run on their own DuckDB instance) replays the
+  `ATTACH` statements that worked, one catalog at a time, and the same `USE`. A catalog that has gone
+  offline since is skipped with a warning instead of blocking the connection.
 - The metadata model extends DBeaver's DuckDB model. It marks `memory`/`system`/`temp` as system
   catalogs (hidden via *Show system objects = off*) and lists a lake's tables via `duckdb_tables()`.
 
