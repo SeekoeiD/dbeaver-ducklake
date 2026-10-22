@@ -41,6 +41,10 @@
                     <parameter name="meta-model" value="ducklake_jdbc"/>
                 </driver>
                 <provider-properties>
+                    <propertyGroup label="DuckLake query guard">
+                        <property id="ducklake.guard.enabled"      label="Query guard"      type="boolean" description="Before a read query runs, estimate how much it will read from object storage (EXPLAIN plus the catalog's file sizes) and ask above the threshold; afterwards, print what it actually read in the Output panel. Default on."/>
+                        <property id="ducklake.guard.threshold_mb" label="Warn above (MB)"  type="string"  description="Estimated read size above which the query guard asks before running a query. Default 100."/>
+                    </propertyGroup>
                     <propertyGroup label="DuckLake storage (S3)">
                         <property id="ducklake.s3.endpoint"  label="S3 endpoint (host:port)" type="string"  description="S3 endpoint without scheme, e.g. localhost:9000 or s3.amazonaws.com. Leave blank for AWS default."/>
                         <property id="ducklake.s3.key"       label="S3 access key"          type="string"  description="S3 access key id. Leave blank to use the AWS credential chain."/>

@@ -1,0 +1,41 @@
+[
+    {
+        "name": "PROJECTION",
+        "children": [
+            {
+                "name": "LIMIT",
+                "children": [
+                    {
+                        "name": "DUCKLAKE_SCAN",
+                        "children": [],
+                        "extra_info": {
+                            "Table": "transfers",
+                            "Projections": [
+                                "asset",
+                                "id",
+                                "ts",
+                                "account",
+                                "counterparty",
+                                "amount"
+                            ],
+                            "Filters": "asset='A7'",
+                            "Estimated Cardinality": "240000"
+                        }
+                    }
+                ],
+                "extra_info": {}
+            }
+        ],
+        "extra_info": {
+            "Projections": [
+                "id",
+                "ts",
+                "account",
+                "counterparty",
+                "amount",
+                "asset"
+            ],
+            "Estimated Cardinality": "0"
+        }
+    }
+]

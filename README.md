@@ -141,6 +141,59 @@ plugin runs `USE "<catalog>"."<schema>"` on each connection, so `SELECT * FROM l
 prefix. If the schema doesn't exist you get a warning and the catalog's own default schema. Picking
 another catalog in DBeaver's active catalog selector puts you in that catalog's `main` schema.
 
+## Query guard
+
+DuckLake keeps the data on object storage and runs the query in DBeaver's own DuckDB. A `GROUP BY`
+over a fact table therefore downloads the projected columns of every file in that table, and DBeaver
+gives no sign of it until the query finishes. The query guard warns you first and tells you
+afterwards what was actually read.
+
+Before a read query (`SELECT`, `WITH`, `FROM`, `TABLE`, `PIVOT`) runs from the SQL editor, the
+plugin:
+
+1. runs `EXPLAIN` on it, which only plans and reads nothing;
+2. takes each DuckLake table scan from the plan, with the columns it projects;
+3. looks up the table's data and delete files with `ducklake_list_files` and estimates
+   `file bytes × projected columns / table columns + delete file bytes`;
+4. adds the scans up and, above the threshold, asks before running the query.
+
+The dialog lists each table with its file count and estimate. **Cancel** stops the query, **Run**
+runs it. Tick **Don't ask again for this connection** to switch the guard off for that connection;
+the setting is saved with it.
+
+After the query, the SQL editor's **Output** panel (the editor's *Show server output* button) gets
+a line like `Query guard: read 47 MB from object storage (114 requests) in 0.29 s`. That number is
+measured: the plugin turns on DuckDB's HTTP log for its own connections and sums the `GET` responses
+of the statement.
+
+Change it on the connection's **DuckLake storage** tab, under **Query guard**: untick the box to turn
+it off, or set **Warn above (MB)** (default 100). New connections and connections saved before 1.3.0
+start with the guard on.
+
+What the estimate does not know:
+
+- **The cache.** DuckDB caches the files it reads in memory, so running a query a second time often
+  reads nothing. The estimate assumes a cold start.
+- **Filters.** DuckLake skips files and row groups using min/max statistics once the scan starts, and
+  plain `EXPLAIN` can't show that. A filtered scan is shown as "up to" the full table, so a point
+  lookup on a big table still asks.
+- **Column widths.** The estimate uses the share of columns, not their sizes. Two narrow columns of
+  an eight-column table count as a quarter of the table even if the other six hold the large text.
+- **Catalog traffic.** Round trips to the Postgres catalog and inlined rows stored there are not
+  counted, in the estimate or in the measurement.
+- `LIMIT` without `ORDER BY` stops early and counts as zero. `ORDER BY ... LIMIT` reads the sort
+  column of the whole table and is counted that way.
+- Statements with bound parameters (`?`, `:name`) run through a prepared statement and are not
+  checked.
+- Queries inside a transaction (manual-commit mode, or after a `BEGIN` you typed) are not checked.
+  Any failed statement aborts an open DuckDB transaction, and the guard won't risk that for an
+  estimate.
+
+The planning step usually takes 20 to 30 ms and the measurement about 15 ms. If planning and the
+catalog lookups together take more than 3 s, the guard gives up on the estimate, says so in the
+Output panel, and runs the query. If you already run DuckDB logging yourself (`CALL enable_logging`),
+the guard leaves the log alone and skips the measurement.
+
 ## Troubleshooting
 
 - **The connection dialog shows only Main and Driver properties, with no DuckLake storage (S3)
@@ -195,6 +248,9 @@ Needs JDK 21 and a DBeaver install to compile against (no Maven/Tycho):
 ```
 
 Then run `install.ps1` from `plugin/dist` (or copy the jars next to `install.ps1`).
+
+`.\test.ps1` runs the unit tests for the query guard's plan parser and estimator against captured
+DuckDB 1.5 and 2.0 plans.
 
 ## How it works
 

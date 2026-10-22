@@ -1,0 +1,90 @@
+[
+    {
+        "name": "PROJECTION",
+        "children": [
+            {
+                "name": "ORDER_BY",
+                "children": [
+                    {
+                        "name": "PROJECTION",
+                        "children": [
+                            {
+                                "name": "HASH_JOIN",
+                                "children": [
+                                    {
+                                        "name": "DUCKLAKE_SCAN",
+                                        "children": [],
+                                        "extra_info": {
+                                            "Table": "transfers",
+                                            "Projections": [
+                                                "id",
+                                                "ts",
+                                                "account",
+                                                "counterparty",
+                                                "amount",
+                                                "asset"
+                                            ],
+                                            "Estimated Cardinality": "1200001"
+                                        }
+                                    },
+                                    {
+                                        "name": "TOP_N",
+                                        "children": [
+                                            {
+                                                "name": "DUCKLAKE_SCAN",
+                                                "children": [],
+                                                "extra_info": {
+                                                    "Table": "transfers",
+                                                    "Projections": "ts",
+                                                    "Filters": "optional: Dynamic Filter (ts)",
+                                                    "Estimated Cardinality": "1200001"
+                                                }
+                                            }
+                                        ],
+                                        "extra_info": {
+                                            "Top": "5",
+                                            "Order By": "lake.main.transfers.ts ASC"
+                                        }
+                                    }
+                                ],
+                                "extra_info": {
+                                    "Join Type": "SEMI",
+                                    "Conditions": [
+                                        "filename = filename",
+                                        "file_row_number = file_row_number"
+                                    ],
+                                    "Estimated Cardinality": "0"
+                                }
+                            }
+                        ],
+                        "extra_info": {
+                            "Projections": [
+                                "__internal_compress_integral_uinteger(#0, 0)",
+                                "#1",
+                                "#2",
+                                "#3",
+                                "#4",
+                                "#5"
+                            ],
+                            "Estimated Cardinality": "0"
+                        }
+                    }
+                ],
+                "extra_info": {
+                    "Order By": "lake.main.transfers.ts ASC"
+                }
+            }
+        ],
+        "extra_info": {
+            "Projections": [
+                "__internal_decompress_integral_bigint(#0, 0)",
+                "#1",
+                "#2",
+                "#3",
+                "#4",
+                "#5"
+            ],
+            "Estimated Cardinality": "0"
+        }
+    }
+]
