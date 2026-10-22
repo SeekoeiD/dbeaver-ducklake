@@ -73,10 +73,11 @@ storage** tab holds the S3 settings and the catalog options.
 | … Region / URL style / Use SSL | `path` style for MinIO/RustFS; SSL on for https endpoints |
 | … DATA_PATH | storage location, e.g. `s3://bucket/prefix/`. Leave blank to browse. Setting it is what **creates** a catalog in the Metadata schema when that schema has none. A value that disagrees with an existing catalog's own location is dropped with a warning |
 | DuckLake catalog → Metadata schema (Postgres) | the Postgres schema whose catalog you want **active**. Blank tries `public` first, then the other readable catalogs. A schema with no catalog in it is skipped with a warning |
-| … Catalog alias | name for whichever catalog ends up active (defaults to `<database>.<schema>`, e.g. `ducklake_catalog.public`) |
+| … Catalog alias | name for whichever catalog ends up active (defaults to its metadata schema, e.g. `public`) |
 | … Default schema (DuckLake) | schema inside the active catalog that unqualified table names resolve to (default `main`) |
 | … Discover and attach all DuckLake catalogs in this database | on by default. Attaches every DuckLake catalog in the database, one per Postgres schema. Off attaches only the Metadata schema one |
 | … Also discover DuckLake catalogs in other databases on this server | on by default. Attaches the catalogs of every other database you can connect to |
+| Results → Stream result sets | off by default. On passes `jdbc_stream_results=true` to the DuckDB driver, which fetches a result in chunks instead of holding it all in memory. Turn it on only for huge exports: a streamed result breaks as soon as DBeaver runs another statement on the connection (see Troubleshooting) |
 
 Everything in the **DuckLake catalog** group is optional. Leave all four fields blank and the plugin
 attaches every catalog your Postgres role can read, then starts you in the first of them.
@@ -110,9 +111,18 @@ live elsewhere, would otherwise leave an empty catalog behind. You get a warning
 candidate instead. Filling in **DATA_PATH** is the one way to say you do want a catalog created
 there.
 
-Every catalog is named `<database>.<schema>`, e.g. `ducklake_catalog.sales` or `analytics.public`, so
-the tree shows where each one lives. **Catalog alias** renames whichever catalog ends up active. The
-dot is part of the name, so quote it in SQL: `SELECT * FROM "analytics.public".main.events`.
+Every catalog is attached under its metadata schema name, so SQL needs no quotes:
+`SELECT * FROM ethereum.bronze.blocks`, `SELECT * FROM sales.main.deals`. When two catalogs would get
+the same name (the same schema in two databases, found by "Also discover DuckLake catalogs in other
+databases"), the one in your own database keeps the plain name and the other becomes
+`<database>_<schema>`, e.g. `analytics_public`. The Postgres database and schema each catalog comes
+from show in the node's tooltip and description. **Catalog alias** renames whichever catalog ends up
+active.
+
+Since 1.2.2. Earlier versions named catalogs `<database>.<schema>` (e.g. `"ducklake_catalog.sales"`),
+which had to be quoted in SQL. Existing connections with a Catalog alias set keep that alias; the
+other catalogs move to the new names on the next connect, so update saved scripts that quote the old
+dotted names.
 
 Here `ducklake-local` is a DuckLake connection to the demo stack below, and `ducklake-local-catalog`
 is a plain PostgreSQL connection to the same server with **Show all databases** on. The DuckLake
@@ -139,6 +149,15 @@ another catalog in DBeaver's active catalog selector puts you in that catalog's 
   nowhere to enter the S3 key. DBeaver 26.2 looks connection pages up through a different extension
   point than 26.1, and plugin 1.2.0 and older register only the 26.1 one. Install 1.2.1 or newer and
   restart DBeaver with `-clean`.
+- **`SQL Error: Invalid Input Error: Invalid result set`** (or `Invalid Input Error: Attempting to
+  execute an unsuccessful or closed pending query result`) on a query that takes more than a second
+  or two. Plugin 1.2.1 and older always connected with `jdbc_stream_results=true`. The DuckDB driver
+  invalidates a streamed result set as soon as another statement runs on the same connection, and
+  DBeaver runs metadata queries on that connection while a slow result is still being fetched. Since
+  1.2.2 streaming is off unless you tick **Stream result sets** on the DuckLake storage tab, so the
+  result is materialized and nothing else can break it. That costs memory for a very large result;
+  for a huge export, tick the option, run the export, and expect the editor to misbehave while it
+  runs. `jdbc_pin_db=true` stays on either way.
 
 ## Try it locally (optional demo stack)
 
@@ -152,16 +171,16 @@ docker compose up -d      # S3 on :9000 (console :9001), Postgres on host :5433
 
 | Postgres database | Metadata schema | Appears in DBeaver as | Tables |
 |---|---|---|---|
-| `ducklake_catalog` | `public` | `ducklake_catalog.public` | `main.customers`, `main.orders` |
-| `ducklake_catalog` | `sales` | `ducklake_catalog.sales` | `main.deals`, `emea.leads` |
-| `ducklake_catalog` | `finance` | `ducklake_catalog.finance` | `main.invoices` |
-| `analytics` | `public` | `analytics.public` | `main.events` |
-| `analytics` | `ml` | `analytics.ml` | `main.features` |
+| `ducklake_catalog` | `public` | `public` | `main.customers`, `main.orders` |
+| `ducklake_catalog` | `sales` | `sales` | `main.deals`, `emea.leads` |
+| `ducklake_catalog` | `finance` | `finance` | `main.invoices` |
+| `analytics` | `public` | `analytics_public` (the plain name is taken) | `main.events` |
+| `analytics` | `ml` | `ml` | `main.features` |
 
 Make a DuckLake connection with Host `localhost`, Port `5433`, Database `ducklake_catalog` and
 User/Password `postgres`. On the storage tab set Endpoint `localhost:9000`, key and secret
 `rustfsadmin`, URL style `path`, SSL off, and leave the rest blank. All five catalogs show up. To start
-SQL editors in the `emea` schema of `ducklake_catalog.sales` instead, set Metadata schema `sales` and
+SQL editors in the `emea` schema of `sales` instead, set Metadata schema `sales` and
 Default schema `emea`.
 
 `quickstart/` shows how to get the same result with the **stock** DuckDB driver (no plugin), for
