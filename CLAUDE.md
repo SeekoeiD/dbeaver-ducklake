@@ -83,9 +83,13 @@ install's `plugins/` folder and packages two jars with `jar`.
 & "$env:LOCALAPPDATA\DBeaver\dbeaver.exe" -clean
 ```
 
-- The build needs DBeaver 26.1.x installed. The plugin links against DBeaver's internal
+- The build needs DBeaver 26.1.x or 26.2.x installed. The plugin links against DBeaver's internal
   `org.jkiss.dbeaver.ext.duckdb` and `ext.generic` classes, so a DBeaver upgrade can break the
   compile. Fix the code, don't pin an older DBeaver.
+- The connection page is registered twice in the UI `plugin.xml`: `org.jkiss.dbeaver.dataSourceView`
+  for 26.1 and older, `org.jkiss.dbeaver.dataSourceConfigurator` for 26.2+. Each DBeaver ignores the
+  point it doesn't declare. Drop either one and that version shows the plain DuckDB page with no
+  storage tab.
 - DBeaver does not load loose `dropins/`. The installers edit
   `configuration/org.eclipse.equinox.simpleconfigurator/bundles.info` and keep a `.orig` backup.
   Always restart DBeaver with `-clean` after install or uninstall.

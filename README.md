@@ -23,7 +23,7 @@ chain), or a local-filesystem lake — empty fields are simply omitted from the 
 
 ## Compatibility
 
-- **DBeaver Community/PRO 26.1.x** (tested against 26.1.1 and 26.1.5). The plugin links against
+- **DBeaver Community/PRO 26.1.x and 26.2.x** (tested against 26.1.1, 26.1.5 and 26.2.3). The plugin links against
   DBeaver's internal `org.jkiss.dbeaver.ext.duckdb` and `…ext.generic` APIs, which ship with
   DBeaver — so it needs a DBeaver version with compatible APIs. Other versions may require a rebuild
   (see [Build from source](#build-from-source)).
@@ -130,6 +130,15 @@ could be attached, and the error dialog then lists every reason.
 plugin runs `USE "<catalog>"."<schema>"` on each connection, so `SELECT * FROM leads` works without a
 prefix. If the schema doesn't exist you get a warning and the catalog's own default schema. Picking
 another catalog in DBeaver's active catalog selector puts you in that catalog's `main` schema.
+
+## Troubleshooting
+
+- **The connection dialog shows only Main and Driver properties, with no DuckLake storage (S3)
+  tab**, and connecting fails with `Secret Validation Failure ... Credential Chain: 'config'`. DBeaver
+  did not pick up the plugin's page registration and fell back to the DuckDB page, so there was
+  nowhere to enter the S3 key. DBeaver 26.2 looks connection pages up through a different extension
+  point than 26.1, and plugin 1.2.0 and older register only the 26.1 one. Install 1.2.1 or newer and
+  restart DBeaver with `-clean`.
 
 ## Try it locally (optional demo stack)
 

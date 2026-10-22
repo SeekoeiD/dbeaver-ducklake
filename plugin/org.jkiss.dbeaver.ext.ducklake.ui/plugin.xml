@@ -5,7 +5,15 @@
 
     <!-- Custom connection UI for the DuckLake data source (id="ducklake").
          Main page reuses the generic page (Host/Port/Database/User/Password = Postgres catalog);
-         an extra tab collects the S3 storage settings. -->
+         an extra tab collects the S3 storage settings.
+
+         DBeaver 26.2 looks pages up through org.jkiss.dbeaver.dataSourceConfigurator; 26.1 and
+         older use org.jkiss.dbeaver.dataSourceView. Each version ignores the point it doesn't
+         declare, so both registrations stay. -->
+    <extension point="org.jkiss.dbeaver.dataSourceConfigurator">
+        <configurator dataSource="ducklake" class="org.jkiss.dbeaver.ext.ducklake.ui.DuckLakeConnectionPage"/>
+    </extension>
+
     <extension point="org.jkiss.dbeaver.dataSourceView">
         <view
                 id="org.jkiss.dbeaver.ext.ducklake.dataSourceWizardView"
