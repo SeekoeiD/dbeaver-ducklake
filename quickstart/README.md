@@ -21,7 +21,7 @@ docker compose up -d
    **not 1.4.0.0**.)
 2. On the connection page choose the **URL** tab ("Connect by: URL") and set:
    ```
-   jdbc:duckdb:;session_init_sql_file=C:/Users/User/Documents/dbeaver-ducklake/quickstart/init.sql;jdbc_pin_db=true;jdbc_stream_results=true;
+   jdbc:duckdb:;session_init_sql_file=C:/Users/User/Documents/dbeaver-ducklake/quickstart/init.sql;jdbc_pin_db=true;jdbc_stream_results=false;
    ```
    (Forward slashes, even on Windows.)
 3. **Connection settings → Main**: tick **Show all databases** so the attached `lake` catalog is

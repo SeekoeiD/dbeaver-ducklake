@@ -40,6 +40,7 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
     private Text defaultSchemaText;
     private Button discoverCheck;
     private Button discoverDatabasesCheck;
+    private Button streamResultsCheck;
 
     public DuckLakeConnectionPageAdvanced() {
         setTitle("DuckLake storage");
@@ -75,7 +76,7 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
             + " read, or that holds no catalog, is skipped with a warning; nothing is created there unless"
             + " DATA_PATH is set.");
         aliasText = UIUtils.createLabelText(lake, "Catalog alias", "");
-        aliasText.setToolTipText("Name for the catalog that ends up active. Blank = <database>.<schema>.");
+        aliasText.setToolTipText("Name for the catalog that ends up active. Blank = its metadata schema name.");
         defaultSchemaText = UIUtils.createLabelText(lake, "Default schema (DuckLake)", "");
         defaultSchemaText.setToolTipText("Schema inside the active catalog that unqualified names resolve to."
             + " Blank = main. A schema that does not exist only costs a warning.");
@@ -83,7 +84,15 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
             lake, "Discover and attach all DuckLake catalogs in this database", null, true, 2);
         discoverDatabasesCheck = UIUtils.createCheckbox(
             lake, "Also discover DuckLake catalogs in other databases on this server",
-            "Attached as <database>.<schema>", true, 2);
+            "Attached under the schema name, or <database>_<schema> when that name is taken", true, 2);
+
+        Composite results = UIUtils.createTitledComposite(group, "Results", 2);
+        results.setLayoutData(new GridData(GridData.FILL_HORIZONTAL));
+        streamResultsCheck = UIUtils.createCheckbox(
+            results, "Stream result sets (only for huge exports)",
+            "Off by default. Streamed results use less memory, but DuckDB invalidates them as soon as another"
+                + " statement runs on the connection, and DBeaver runs metadata queries while a slow result is"
+                + " still being read: 'Invalid Input Error: Invalid result set'.", false, 2);
 
         setControl(group);
         loadSettings();
@@ -107,6 +116,8 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
             cfg.getProviderProperty(DuckLakeConstants.PROP_DISCOVER_SCHEMAS), true));
         discoverDatabasesCheck.setSelection(CommonUtils.getBoolean(
             cfg.getProviderProperty(DuckLakeConstants.PROP_DISCOVER_DATABASES), true));
+        streamResultsCheck.setSelection(CommonUtils.getBoolean(
+            cfg.getProviderProperty(DuckLakeConstants.PROP_STREAM_RESULTS), false));
     }
 
     @Override
@@ -124,6 +135,7 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
         cfg.setProviderProperty(DuckLakeConstants.PROP_DEFAULT_SCHEMA, defaultSchemaText.getText().trim());
         cfg.setProviderProperty(DuckLakeConstants.PROP_DISCOVER_SCHEMAS, CommonUtils.toString(discoverCheck.getSelection()));
         cfg.setProviderProperty(DuckLakeConstants.PROP_DISCOVER_DATABASES, CommonUtils.toString(discoverDatabasesCheck.getSelection()));
+        cfg.setProviderProperty(DuckLakeConstants.PROP_STREAM_RESULTS, CommonUtils.toString(streamResultsCheck.getSelection()));
     }
 
     @Override

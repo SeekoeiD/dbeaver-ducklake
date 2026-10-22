@@ -56,6 +56,13 @@ public class DuckLakeDataSource extends DuckDBDataSource {
      */
     private volatile Map<String, String> discoveredAttachments;
 
+    /**
+     * Catalog name to {@code <database>.<schema>} on the Postgres server, set by discovery. The
+     * catalog nodes show it as their description, since the name alone no longer says which
+     * database a catalog comes from. Null until discovery has run.
+     */
+    private volatile Map<String, String> catalogSources;
+
     /** The catalog {@code USE} selects, chosen by discovery. Null until discovery has run. */
     private volatile String activeCatalog;
 
@@ -118,6 +125,15 @@ public class DuckLakeDataSource extends DuckDBDataSource {
 
         super.initializeContextState(monitor, context, initFrom);
         restoreDefaultSchema(monitor, context);
+    }
+
+    /**
+     * Where a discovered catalog lives on the Postgres server, {@code <database>.<schema>}, or null
+     * for a catalog discovery did not attach (DuckDB's built-ins, or one attached by hand in SQL).
+     */
+    public String getCatalogSource(@NotNull String catalogName) {
+        Map<String, String> sources = catalogSources;
+        return sources == null ? null : sources.get(catalogName);
     }
 
     /**
@@ -262,6 +278,7 @@ public class DuckLakeDataSource extends DuckDBDataSource {
         }
 
         discoveredAttachments = Collections.unmodifiableMap(new LinkedHashMap<>(result.attachStatements()));
+        catalogSources = Collections.unmodifiableMap(new LinkedHashMap<>(result.sources()));
         activeCatalog = result.activeCatalog();
 
         log.info("DuckLake active catalog '" + result.activeCatalog() + "', " + result.attached()

@@ -54,29 +54,50 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
         String s3style = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_URL_STYLE));
         boolean s3ssl = CommonUtils.getBoolean(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_USE_SSL), false);
         String dataPath = CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_DATA_PATH));
+        boolean streamResults = CommonUtils.getBoolean(cfg.getProviderProperty(DuckLakeConstants.PROP_STREAM_RESULTS), false);
 
         boolean useS3 = dataPath.startsWith("s3://") || !s3endpoint.isEmpty() || !s3key.isEmpty();
         String initSql = buildInitSql(useS3, s3endpoint, s3key, s3secret, s3region, s3style, s3ssl);
 
         try {
-            return connectionURL(writeInitFile(initSql));
+            return connectionURL(writeInitFile(initSql), streamResults);
         } catch (IOException e) {
             log.error("Failed to write DuckLake init SQL file; falling back to plain DuckDB URL", e);
             return "jdbc:duckdb:";
         }
     }
 
-    private static String connectionURL(String initFilePath) {
-        return "jdbc:duckdb:;session_init_sql_file=" + initFilePath + ";jdbc_pin_db=true;jdbc_stream_results=true;";
+    /**
+     * {@code jdbc_stream_results} is opt-in. With it on, the DuckDB driver invalidates a streamed
+     * result set as soon as another statement runs on the same connection, and DBeaver runs
+     * metadata queries while a slow result is still being fetched, so any query that takes more
+     * than a second or two can fail with "Invalid Input Error: Invalid result set". Off, results are
+     * materialized: more memory for a huge result, but nothing else can break them.
+     */
+    private static String connectionURL(String initFilePath, boolean streamResults) {
+        return "jdbc:duckdb:;session_init_sql_file=" + initFilePath + ";jdbc_pin_db=true;jdbc_stream_results="
+            + streamResults + ";";
     }
 
     /**
-     * Name a catalog after where it lives, {@code <database>.<metadata schema>}, so every node in the
-     * tree says which Postgres database and schema it comes from. Without a database setting it is
-     * just the schema name.
+     * The name a catalog is attached under: its metadata schema, so a query reads
+     * {@code ethereum.bronze.blocks} with no quotes. The database is not part of the name (the tree
+     * shows it in the catalog's description instead); it only comes in through
+     * {@link #collisionAlias} when two attached catalogs share a schema name. {@code db} is kept in
+     * the signature so callers written against 1.2.1 and older still link.
      */
     public static String defaultAlias(String db, String metadataSchema) {
-        return CommonUtils.isEmpty(db) ? metadataSchema : db + "." + metadataSchema;
+        return metadataSchema;
+    }
+
+    /**
+     * The name for a catalog whose schema name is already taken by another catalog in the same
+     * connection, which happens when "also discover other databases" finds the same schema in two
+     * Postgres databases: {@code <database>_<metadata schema>}. An underscore rather than a dot, so
+     * the name still needs no quoting.
+     */
+    public static String collisionAlias(String db, String metadataSchema) {
+        return CommonUtils.isEmpty(db) ? metadataSchema : db + "_" + metadataSchema;
     }
 
     /**

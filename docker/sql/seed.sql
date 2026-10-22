@@ -7,11 +7,11 @@
 -- tables in one Postgres schema, so it is identified by (database, METADATA_SCHEMA):
 --
 --   database          METADATA_SCHEMA  seed alias    DBeaver plugin node
---   ducklake_catalog  public           lake          ducklake_catalog.public (primary)
---   ducklake_catalog  sales            sales         ducklake_catalog.sales
---   ducklake_catalog  finance          finance       ducklake_catalog.finance
---   analytics         public           analytics     analytics.public
---   analytics         ml               analytics_ml  analytics.ml
+--   ducklake_catalog  public           lake          public (primary)
+--   ducklake_catalog  sales            sales         sales
+--   ducklake_catalog  finance          finance       finance
+--   analytics         public           analytics     analytics_public (public is taken)
+--   analytics         ml               analytics_ml  ml
 --
 -- seed.py creates the analytics database and the metadata schemas before this script runs.
 

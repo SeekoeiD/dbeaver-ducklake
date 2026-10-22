@@ -1,7 +1,7 @@
 -- DuckLake session-init for the STOCK DuckDB driver (Milestone 1 quick-start).
 --
 -- Point DBeaver's built-in DuckDB driver at this file via the JDBC URL:
---   jdbc:duckdb:;session_init_sql_file=C:/Users/User/Documents/dbeaver-ducklake/quickstart/init.sql;jdbc_pin_db=true;jdbc_stream_results=true;
+--   jdbc:duckdb:;session_init_sql_file=C:/Users/User/Documents/dbeaver-ducklake/quickstart/init.sql;jdbc_pin_db=true;jdbc_stream_results=false;
 --
 -- The DuckDB driver runs everything ABOVE the marker once per DB instance and the
 -- statement(s) BELOW the marker on EVERY physical connection. Because DBeaver opens a
