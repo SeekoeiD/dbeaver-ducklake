@@ -90,7 +90,7 @@ public final class QueryGuardEstimate {
         return keyword != null && GUARDED_KEYWORDS.contains(keyword);
     }
 
-    static String firstKeyword(String sql) {
+    public static String firstKeyword(String sql) {
         if (sql == null) {
             return null;
         }
@@ -217,7 +217,13 @@ public final class QueryGuardEstimate {
             return named.get(0);
         }
 
-        List<Candidate> pool = named.isEmpty() ? candidates : named;
+        // Several tables of this name are named in the SQL (a join across catalogs, say): which
+        // one this scan reads is unknown, so let the caller size them all and keep the largest.
+        if (named.size() > 1) {
+            return null;
+        }
+
+        List<Candidate> pool = candidates;
         Candidate inCatalog = null;
         int inCatalogCount = 0;
 

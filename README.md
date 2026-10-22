@@ -175,8 +175,9 @@ What the estimate does not know:
   column of the whole table and is counted that way.
 - Statements with bound parameters (`?`, `:name`) run through a prepared statement and are not
   checked.
-- Connections in manual-commit mode are not checked. Any failed statement aborts an open DuckDB
-  transaction, and the guard won't risk that for an estimate.
+- Queries inside a transaction (manual-commit mode, or after a `BEGIN` you typed) are not checked.
+  Any failed statement aborts an open DuckDB transaction, and the guard won't risk that for an
+  estimate.
 
 The planning step usually takes 20 to 30 ms and the measurement about 15 ms. If planning and the
 catalog lookups together take more than 3 s, the guard gives up on the estimate, says so in the

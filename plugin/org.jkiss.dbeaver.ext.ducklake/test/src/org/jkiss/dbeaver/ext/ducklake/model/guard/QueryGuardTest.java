@@ -329,6 +329,11 @@ public final class QueryGuardTest {
         check(QueryGuardEstimate.choose(all, "SELECT * FROM mydeals", "lake", "main") == lakeMain, "choose: no false mention");
         check(QueryGuardEstimate.choose(List.of(salesMain, lakeMain), "SELECT * FROM sales.deals", "lake", "main") == salesMain,
             "choose: catalog.table shorthand");
+        QueryGuardEstimate.Candidate small = new QueryGuardEstimate.Candidate("small", "main", "events", 3);
+        QueryGuardEstimate.Candidate large = new QueryGuardEstimate.Candidate("large", "main", "events", 3);
+        check(QueryGuardEstimate.choose(List.of(small, large),
+                "SELECT * FROM small.main.events a JOIN large.main.events b USING (id)", "small", "main") == null,
+            "choose: two named tables stay ambiguous, the caller keeps the largest");
     }
 
     /** SELECT count(*) ... WHERE asset = 'A7': DuckDB projects nothing, but the filter reads asset. */

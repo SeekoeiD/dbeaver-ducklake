@@ -80,6 +80,9 @@ public final class QueryGuard {
 
     private static final int MAX_PENDING = 50;
 
+    /** JDBC connections on which the user ran BEGIN and has not yet ended the transaction. */
+    private static final Map<Connection, Boolean> IN_TRANSACTION = Collections.synchronizedMap(new WeakHashMap<>());
+
     /** Lines waiting for the Output panel, per execution context. */
     private static final Map<DBCExecutionContext, List<String>> PENDING = Collections.synchronizedMap(new WeakHashMap<>());
 
@@ -137,7 +140,7 @@ public final class QueryGuard {
         DBPDataSourceContainer container = session.getDataSource().getContainer();
         DBPConnectionConfiguration cfg = container.getActualConnectionConfiguration();
 
-        if (!isEnabled(cfg) || !QueryGuardEstimate.isGuardable(sql)) {
+        if (!isEnabled(cfg)) {
             return null;
         }
 
@@ -150,11 +153,18 @@ public final class QueryGuard {
             return null;
         }
 
+        trackExplicitTransaction(connection, sql);
+
+        if (!QueryGuardEstimate.isGuardable(sql)) {
+            return null;
+        }
+
         try {
             // Any failed statement aborts an open DuckDB transaction, and the pre-flight can fail
             // (or be cancelled at its deadline) for reasons that have nothing to do with the
-            // user's query. In manual-commit mode the guard therefore stays out of the way.
-            if (!connection.getAutoCommit()) {
+            // user's query. Inside a transaction (manual-commit mode, or a BEGIN typed in the
+            // editor, which DuckDB JDBC does not report) the guard therefore stays out of the way.
+            if (!connection.getAutoCommit() || IN_TRANSACTION.containsKey(connection)) {
                 return null;
             }
         } catch (SQLException e) {
@@ -189,6 +199,23 @@ public final class QueryGuard {
 
         boolean measure = resetHttpLog(connection);
         return new Token(connection, context, System.nanoTime(), measure);
+    }
+
+    /** Note BEGIN / COMMIT / ROLLBACK typed by the user, which auto-commit mode does not show. */
+    private static void trackExplicitTransaction(Connection connection, String sql) {
+        String keyword = QueryGuardEstimate.firstKeyword(sql);
+
+        if (keyword == null) {
+            return;
+        }
+
+        switch (keyword) {
+            case "BEGIN", "START" -> IN_TRANSACTION.put(connection, Boolean.TRUE);
+            case "COMMIT", "ROLLBACK", "END", "ABORT" -> IN_TRANSACTION.remove(connection);
+            default -> {
+                // not a transaction statement
+            }
+        }
     }
 
     /** EXPLAIN the statement and size its DuckLake scans. Empty when the plan reads no DuckLake table. */
@@ -383,6 +410,15 @@ public final class QueryGuard {
 
             if (!Boolean.TRUE.equals(OWNED_LOGGING.get(connection))) {
                 return false;
+            }
+
+            // The user may have reconfigured logging since; then the log is theirs and stays.
+            try (ResultSet rs = stmt.executeQuery(
+                "SELECT current_setting('enable_logging'), current_setting('enabled_log_types')")) {
+                if (!rs.next() || !rs.getBoolean(1) || !"HTTP".equalsIgnoreCase(String.valueOf(rs.getString(2)))) {
+                    OWNED_LOGGING.put(connection, Boolean.FALSE);
+                    return false;
+                }
             }
 
             stmt.execute("CALL truncate_duckdb_logs()");
