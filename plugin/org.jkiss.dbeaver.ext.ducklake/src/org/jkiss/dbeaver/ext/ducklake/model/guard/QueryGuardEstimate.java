@@ -199,6 +199,13 @@ public final class QueryGuardEstimate {
             }
         }
 
+        // A qualified mention says which table that mention reads, not which one this scan reads.
+        // When the SQL also names the table unqualified ("small.main.events JOIN events"), DuckDB
+        // 1.5 prints "events" for both scans, so neither can be pinned: size them all.
+        if (!named.isEmpty() && mentionsBare(sql, candidates.get(0).table())) {
+            return null;
+        }
+
         // "emea.leads" also matches a catalog "emea" holding a table "leads" in some schema; the
         // fully qualified form wins over that.
         List<Candidate> fully = new ArrayList<>();
@@ -256,6 +263,39 @@ public final class QueryGuardEstimate {
 
         regex.append("(?![\\w\"])");
         return Pattern.compile(regex.toString()).matcher(sql).find();
+    }
+
+    /**
+     * Whether the SQL names the table on its own, not as the last part of a qualified name and
+     * not as the qualifier of a column ({@code events.id}).
+     */
+    static boolean mentionsBare(String sql, String table) {
+        String quoted = Pattern.quote(table);
+        java.util.regex.Matcher m = Pattern.compile(
+            "(?i)(?<![\\w\"])(?:" + quoted + "|\"" + quoted + "\")(?![\\w\"])").matcher(sql);
+
+        while (m.find()) {
+            int before = m.start() - 1;
+
+            while (before >= 0 && Character.isWhitespace(sql.charAt(before))) {
+                before--;
+            }
+
+            int after = m.end();
+
+            while (after < sql.length() && Character.isWhitespace(sql.charAt(after))) {
+                after++;
+            }
+
+            boolean qualified = before >= 0 && sql.charAt(before) == '.';
+            boolean qualifier = after < sql.length() && sql.charAt(after) == '.';
+
+            if (!qualified && !qualifier) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // ------------------------------------------------------------------ bytes
@@ -432,6 +472,40 @@ public final class QueryGuardEstimate {
         sb.append("DuckDB's in-process cache may already hold some of this data. Catalog round trips"
             + " and inlined rows are not counted.");
         return sb.toString();
+    }
+
+    // ------------------------------------------------------------------ measurement
+
+    /**
+     * Value the guard puts in {@code disabled_log_types} when it switches HTTP logging on. Logging
+     * settings are global to a DuckDB instance; the marker tells every connection of the instance
+     * that the log is the guard's. {@code CALL enable_logging(...)} clears it, so a user who sets
+     * up logging takes the log over.
+     */
+    public static final String LOGGING_MARKER = "DuckLakeQueryGuard";
+
+    /** Who runs a DuckDB instance's logging. */
+    public enum LoggingState { OFF, GUARD, USER }
+
+    public static LoggingState loggingState(boolean enabled, String enabledTypes, String disabledTypes) {
+        if (!enabled) {
+            return LoggingState.OFF;
+        }
+
+        boolean httpOnly = "HTTP".equalsIgnoreCase(String.valueOf(enabledTypes).trim());
+        boolean marked = LOGGING_MARKER.equals(String.valueOf(disabledTypes).trim());
+        return httpOnly && marked ? LoggingState.GUARD : LoggingState.USER;
+    }
+
+    /**
+     * Requests and GET bytes one connection logged since a point in time. Other connections of the
+     * same DuckDB instance write to the same log, so the connection id keeps their traffic out.
+     */
+    public static String httpStatsSql(long connectionId, long sinceEpochMicros) {
+        return "SELECT count(*), coalesce(sum(TRY_CAST(coalesce(response.headers['content-length'],"
+            + " response.headers['Content-Length']) AS BIGINT)) FILTER (WHERE request.type = 'GET'), 0)"
+            + " FROM duckdb_logs_parsed('HTTP')"
+            + " WHERE connection_id = " + connectionId + " AND epoch_us(timestamp) >= " + sinceEpochMicros;
     }
 
     /** The line the output panel gets after a statement ran. */

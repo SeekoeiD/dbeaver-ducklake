@@ -73,6 +73,7 @@ public final class QueryGuardTest {
         estimateLimitedScan();
         estimateDeleteFiles();
         chooseCandidate();
+        loggingOwnership();
         filterOnlyColumns();
         guardableStatements();
         formatting();
@@ -334,6 +335,51 @@ public final class QueryGuardTest {
         check(QueryGuardEstimate.choose(List.of(small, large),
                 "SELECT * FROM small.main.events a JOIN large.main.events b USING (id)", "small", "main") == null,
             "choose: two named tables stay ambiguous, the caller keeps the largest");
+
+        // DuckDB 1.5 prints "events" for both scans; the qualified mention must not win for both.
+        check(QueryGuardEstimate.choose(List.of(small, large),
+                "SELECT * FROM small.main.events s JOIN events e USING (id)", "large", "main") == null,
+            "choose: qualified plus unqualified mention stays ambiguous");
+        check(QueryGuardEstimate.choose(List.of(small, large),
+                "SELECT * FROM \"small\".main.\"events\" s JOIN \"events\" e USING (id)", "large", "main") == null,
+            "choose: quoted qualified plus quoted unqualified mention stays ambiguous");
+        check(QueryGuardEstimate.choose(List.of(small, large),
+                "SELECT events.id FROM small.main.events", "large", "main") == small,
+            "choose: a column qualifier is not an unqualified table mention");
+        check(QueryGuardEstimate.choose(List.of(small, large),
+                "SELECT * FROM small.main . events", "large", "main") == small,
+            "choose: spaces around the dot keep the mention qualified");
+
+        check(QueryGuardEstimate.mentionsBare("SELECT * FROM events", "events"), "bare: plain");
+        check(QueryGuardEstimate.mentionsBare("SELECT * FROM \"Events\" e", "events"), "bare: quoted, other case");
+        check(!QueryGuardEstimate.mentionsBare("SELECT * FROM a.events", "events"), "bare: qualified");
+        check(!QueryGuardEstimate.mentionsBare("SELECT events.id FROM a.events", "events"), "bare: column qualifier");
+        check(!QueryGuardEstimate.mentionsBare("SELECT * FROM my_events", "events"), "bare: part of another name");
+    }
+
+    /**
+     * Logging is global to a DuckDB instance, which several connections may share: the guard
+     * recognises its own logging by the marker, and counts only one connection's entries.
+     */
+    private static void loggingOwnership() {
+        String marker = QueryGuardEstimate.LOGGING_MARKER;
+
+        check(QueryGuardEstimate.loggingState(false, "", "") == QueryGuardEstimate.LoggingState.OFF, "logging: off");
+        check(QueryGuardEstimate.loggingState(false, "HTTP", marker) == QueryGuardEstimate.LoggingState.OFF,
+            "logging: switched off after the guard had it");
+        check(QueryGuardEstimate.loggingState(true, "HTTP", marker) == QueryGuardEstimate.LoggingState.GUARD,
+            "logging: on with the marker, from any connection of the instance, is the guard's");
+        check(QueryGuardEstimate.loggingState(true, "HTTP", "") == QueryGuardEstimate.LoggingState.USER,
+            "logging: CALL enable_logging('HTTP') by the user clears the marker");
+        check(QueryGuardEstimate.loggingState(true, "HTTP,QueryLog", marker) == QueryGuardEstimate.LoggingState.USER,
+            "logging: more types than HTTP are the user's");
+        check(QueryGuardEstimate.loggingState(true, "", "") == QueryGuardEstimate.LoggingState.USER, "logging: user, all types");
+        check(QueryGuardEstimate.loggingState(true, null, null) == QueryGuardEstimate.LoggingState.USER, "logging: nulls");
+
+        String sql = QueryGuardEstimate.httpStatsSql(7, 1_792_678_837_163_549L);
+        check(sql.contains("WHERE connection_id = 7 AND epoch_us(timestamp) >= 1792678837163549"),
+            "logging: stats filtered to one connection and the statement's time\n" + sql);
+        check(sql.contains("duckdb_logs_parsed('HTTP')") && sql.contains("request.type = 'GET'"), "logging: stats source\n" + sql);
     }
 
     /** SELECT count(*) ... WHERE asset = 'A7': DuckDB projects nothing, but the filter reads asset. */

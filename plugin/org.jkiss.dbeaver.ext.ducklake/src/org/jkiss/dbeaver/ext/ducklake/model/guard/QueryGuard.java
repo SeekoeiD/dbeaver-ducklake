@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -47,9 +48,12 @@ import java.util.concurrent.TimeUnit;
  *     threshold. The whole pre-flight gets {@link #BUDGET_MS}; past that it gives up and lets the
  *     statement run.</li>
  *     <li>After: read DuckDB's HTTP log ({@code duckdb_logs_parsed('HTTP')}) for what the statement
- *     really fetched, and queue a line for the SQL editor's Output panel. The guard turns HTTP
- *     logging on for its own connections, and stays out of the way (no measurement) when the user
- *     already had DuckDB logging on, because it truncates the log between statements.</li>
+ *     really fetched, and queue a line for the SQL editor's Output panel. Logging is per DuckDB
+ *     instance, which DBeaver's execution contexts may share: the guard switches HTTP logging on
+ *     with a marker in {@code disabled_log_types} so every connection of the instance can tell it
+ *     is the guard's, counts only the log entries of the statement's own connection since it
+ *     started, and empties the log when no measurement is running. It stays out of the way (no
+ *     measurement) when the user runs DuckDB logging themselves.</li>
  * </ul>
  *
  * <p>Everything here runs on the raw JDBC connection of the statement being guarded, so none of it
@@ -70,13 +74,36 @@ public final class QueryGuard {
         return t;
     });
 
-    private static final String HTTP_STATS_SQL =
-        "SELECT count(*), coalesce(sum(TRY_CAST(coalesce(response.headers['content-length'],"
-            + " response.headers['Content-Length']) AS BIGINT)) FILTER (WHERE request.type = 'GET'), 0)"
-            + " FROM duckdb_logs_parsed('HTTP')";
+    private static final String LOGGING_STATE_SQL =
+        "SELECT current_setting('enable_logging'), current_setting('enabled_log_types'),"
+            + " current_setting('disabled_log_types')";
 
-    /** JDBC connections on which the guard switched DuckDB's HTTP logging on itself. */
-    private static final Map<Connection, Boolean> OWNED_LOGGING = Collections.synchronizedMap(new WeakHashMap<>());
+    /**
+     * Switches HTTP logging on for the whole DuckDB instance. The marker goes in first, so another
+     * connection of the same instance never sees the guard's logging without it.
+     */
+    private static final String[] ENABLE_LOGGING_SQL = {
+        "SET GLOBAL disabled_log_types = '" + QueryGuardEstimate.LOGGING_MARKER + "'",
+        "SET GLOBAL enabled_log_types = 'HTTP'",
+        "SET GLOBAL logging_mode = 'ENABLE_SELECTED'",
+        "SET GLOBAL logging_level = 'DEBUG'",
+        "SET GLOBAL enable_logging = true",
+    };
+
+    /**
+     * JDBC connections the guard never measures on: the user runs DuckDB logging there, or logging
+     * is not available. Logging settings belong to the DuckDB instance, which several connections
+     * (DBeaver's execution contexts) may share, so who owns the log is read from the instance each
+     * time; this only remembers the connections that gave up.
+     */
+    private static final Map<Connection, Boolean> NO_MEASUREMENT = Collections.synchronizedMap(new WeakHashMap<>());
+
+    /**
+     * Measurements started and not read yet, on any connection. The log is shared by every
+     * connection of an instance, so it is only emptied when none is left. Weak, so a statement
+     * that is never closed does not block that forever.
+     */
+    private static final Set<Token> IN_FLIGHT = Collections.newSetFromMap(new WeakHashMap<>());
 
     private static final int MAX_PENDING = 50;
 
@@ -92,9 +119,12 @@ public final class QueryGuard {
     /**
      * State carried from {@link #beforeExecute} to {@link #afterClose} for one execution.
      *
-     * @param measure whether the HTTP log was reset for this statement and should be read after it
+     * @param measure      whether the HTTP log should be read after the statement
+     * @param connectionId DuckDB's id of the connection, which the log records per entry
+     * @param sinceMicros  DuckDB's clock (epoch microseconds) just before the statement
      */
-    public record Token(Connection connection, DBCExecutionContext context, long startNanos, boolean measure) {
+    public record Token(Connection connection, DBCExecutionContext context, long startNanos, boolean measure,
+                        long connectionId, long sinceMicros) {
     }
 
     // ------------------------------------------------------------------ settings
@@ -197,8 +227,19 @@ public final class QueryGuard {
             }
         }
 
-        boolean measure = resetHttpLog(connection);
-        return new Token(connection, context, System.nanoTime(), measure);
+        long[] mark = startMeasurement(connection);
+
+        if (mark == null) {
+            return new Token(connection, context, System.nanoTime(), false, 0, 0);
+        }
+
+        Token token = new Token(connection, context, System.nanoTime(), true, mark[0], mark[1]);
+
+        synchronized (IN_FLIGHT) {
+            IN_FLIGHT.add(token);
+        }
+
+        return token;
     }
 
     /** Note BEGIN / COMMIT / ROLLBACK typed by the user, which auto-commit mode does not show. */
@@ -387,46 +428,55 @@ public final class QueryGuard {
     // ------------------------------------------------------------------ after
 
     /**
-     * Turn HTTP logging on if nobody has, and empty the log, so that what is in it after the
-     * statement is the statement's own traffic. False when the user runs DuckDB logging themselves
-     * (the guard then leaves the log alone and measures nothing) or when it fails.
+     * Make sure the DuckDB instance logs HTTP for the guard and note where the statement's own
+     * traffic will start in the log: this connection's id and the current time. Null when the user
+     * runs DuckDB logging themselves (the guard then leaves the log alone and measures nothing) or
+     * when logging is not available.
      */
-    private static boolean resetHttpLog(Connection connection) {
+    @Nullable
+    private static long[] startMeasurement(Connection connection) {
+        if (NO_MEASUREMENT.containsKey(connection)) {
+            return null;
+        }
+
         try (Statement stmt = connection.createStatement()) {
-            if (!OWNED_LOGGING.containsKey(connection)) {
-                boolean on;
+            QueryGuardEstimate.LoggingState state = loggingState(stmt);
 
-                try (ResultSet rs = stmt.executeQuery("SELECT current_setting('enable_logging')")) {
-                    on = rs.next() && rs.getBoolean(1);
+            if (state == QueryGuardEstimate.LoggingState.OFF) {
+                for (String sql : ENABLE_LOGGING_SQL) {
+                    stmt.execute(sql);
                 }
 
-                if (on) {
-                    OWNED_LOGGING.put(connection, Boolean.FALSE);
-                } else {
-                    stmt.execute("CALL enable_logging('HTTP')");
-                    OWNED_LOGGING.put(connection, Boolean.TRUE);
+                state = loggingState(stmt);
+            }
+
+            // Logging the user set up, or reconfigured since the guard switched it on: theirs.
+            if (state != QueryGuardEstimate.LoggingState.GUARD) {
+                NO_MEASUREMENT.put(connection, Boolean.TRUE);
+                return null;
+            }
+
+            try (ResultSet rs = stmt.executeQuery("SELECT current_connection_id(), epoch_us(get_current_timestamp())")) {
+                if (!rs.next()) {
+                    return null;
                 }
-            }
 
-            if (!Boolean.TRUE.equals(OWNED_LOGGING.get(connection))) {
-                return false;
+                return new long[] {rs.getLong(1), rs.getLong(2)};
             }
-
-            // The user may have reconfigured logging since; then the log is theirs and stays.
-            try (ResultSet rs = stmt.executeQuery(
-                "SELECT current_setting('enable_logging'), current_setting('enabled_log_types')")) {
-                if (!rs.next() || !rs.getBoolean(1) || !"HTTP".equalsIgnoreCase(String.valueOf(rs.getString(2)))) {
-                    OWNED_LOGGING.put(connection, Boolean.FALSE);
-                    return false;
-                }
-            }
-
-            stmt.execute("CALL truncate_duckdb_logs()");
-            return true;
         } catch (Exception e) {
             log.debug("Query guard: HTTP logging unavailable: " + e.getMessage());
-            OWNED_LOGGING.put(connection, Boolean.FALSE);
-            return false;
+            NO_MEASUREMENT.put(connection, Boolean.TRUE);
+            return null;
+        }
+    }
+
+    private static QueryGuardEstimate.LoggingState loggingState(Statement stmt) throws SQLException {
+        try (ResultSet rs = stmt.executeQuery(LOGGING_STATE_SQL)) {
+            if (!rs.next()) {
+                return QueryGuardEstimate.LoggingState.USER;
+            }
+
+            return QueryGuardEstimate.loggingState(rs.getBoolean(1), rs.getString(2), rs.getString(3));
         }
     }
 
@@ -442,7 +492,8 @@ public final class QueryGuard {
             long requests;
             long bytes;
 
-            try (ResultSet rs = stmt.executeQuery(HTTP_STATS_SQL)) {
+            try (ResultSet rs = stmt.executeQuery(
+                QueryGuardEstimate.httpStatsSql(token.connectionId(), token.sinceMicros()))) {
                 if (!rs.next()) {
                     return;
                 }
@@ -451,12 +502,35 @@ public final class QueryGuard {
                 bytes = rs.getLong(2);
             }
 
-            stmt.execute("CALL truncate_duckdb_logs()");
             String message = QueryGuardEstimate.measurementMessage(requests, bytes, seconds);
             log.info(message);
             addMessage(token.context(), message);
         } catch (Exception e) {
             log.debug("Query guard: could not read HTTP stats: " + e.getMessage());
+        } finally {
+            finishMeasurement(token);
+        }
+    }
+
+    /**
+     * Drop the measurement and, when no other one is running, empty the log so it does not grow in
+     * memory. Only while the guard still owns the instance's logging; a user's log stays.
+     */
+    private static void finishMeasurement(Token token) {
+        synchronized (IN_FLIGHT) {
+            IN_FLIGHT.remove(token);
+
+            if (!IN_FLIGHT.isEmpty()) {
+                return;
+            }
+
+            try (Statement stmt = token.connection().createStatement()) {
+                if (loggingState(stmt) == QueryGuardEstimate.LoggingState.GUARD) {
+                    stmt.execute("CALL truncate_duckdb_logs()");
+                }
+            } catch (Exception e) {
+                log.debug("Query guard: could not empty the HTTP log: " + e.getMessage());
+            }
         }
     }
 
