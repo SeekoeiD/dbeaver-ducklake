@@ -35,8 +35,10 @@ import java.util.regex.Pattern;
  * <p>Catalogs are tried in a fixed order: the configured metadata schema (or {@code public} when
  * that field is blank), then the other schemas of this database alphabetically, then the other
  * databases. The first one that attaches becomes the active catalog, the one a new SQL editor
- * starts in. Every catalog is named {@code <database>.<schema>}, except the active one when a
- * catalog alias is configured.
+ * starts in. Every catalog is named after its metadata schema, so SQL reads
+ * {@code ethereum.bronze.blocks} without quotes. A catalog whose schema name is already taken (the
+ * same schema in two databases, or a name the configured alias claimed) falls back to
+ * {@code <database>_<schema>}. The configured catalog alias, if any, renames the active one.
  *
  * <p>Nothing here ever creates a catalog by accident. DuckLake's ATTACH creates one when the schema
  * has no {@code ducklake_metadata} table, so only schemas that already hold one are attached. The
@@ -89,22 +91,28 @@ public final class DuckLakeCatalogDiscovery {
      * @param attached         catalogs attached on this DuckDB instance
      * @param skipped          catalogs that could not be attached
      * @param warnings         catalogs or databases that were skipped, and why
+     * @param sources          catalog name to where it lives, {@code <database>.<schema>} on the
+     *                         Postgres server, for the description of each catalog node
      */
     public record Result(
         Map<String, String> attachStatements,
         String activeCatalog,
         int attached,
         int skipped,
-        List<String> warnings
+        List<String> warnings,
+        Map<String, String> sources
     ) {
     }
 
     /**
      * A catalog to try, in the order it should be tried. {@code name} is the name it is attached as
-     * unless it turns out to be the active one and an alias is configured; {@code preferred} marks
-     * the one the DATA_PATH setting applies to.
+     * unless it turns out to be the active one and an alias is configured. {@code fallbackName}
+     * ({@code <database>_<schema>}) replaces {@code name} when the configured alias has claimed it
+     * by attach time. {@code preferred} marks the one the DATA_PATH setting applies to.
      */
-    private record Candidate(String pgConn, String schema, String name, String label, boolean preferred) {
+    private record Candidate(
+        String pgConn, String database, String schema, String name, String fallbackName, String label, boolean preferred
+    ) {
     }
 
     private DuckLakeCatalogDiscovery() {
@@ -115,8 +123,8 @@ public final class DuckLakeCatalogDiscovery {
      *
      * @param metadataSchema the configured preferred primary schema; blank means try {@code public}
      *                       first and fall back to whatever else is readable
-     * @param catalogAlias   the configured name for the active catalog; blank means
-     *                       {@code <database>.<schema>}
+     * @param catalogAlias   the configured name for the active catalog; blank means the
+     *                       catalog's metadata schema
      * @param dataPath       the configured DATA_PATH, only offered to the preferred catalog and
      *                       dropped again when the catalog already records a different location.
      *                       Setting it is also the only thing that lets a schema with no catalog
@@ -156,7 +164,7 @@ public final class DuckLakeCatalogDiscovery {
 
             try {
                 List<Candidate> candidates = collectCandidates(
-                    con, pgConn, host, port, db, user, pass, preferredSchema, path,
+                    con, pgConn, host, port, user, pass, preferredSchema, path,
                     includeSchemas, includeDatabases, warnings);
 
                 return attachAll(con, candidates, path, activeAlias, warnings);
@@ -207,7 +215,7 @@ public final class DuckLakeCatalogDiscovery {
      */
     private static List<Candidate> collectCandidates(
         Connection con, String pgConn,
-        String host, String port, String db, String user, String pass,
+        String host, String port, String user, String pass,
         String preferredSchema, String dataPath,
         boolean includeSchemas, boolean includeDatabases,
         List<String> warnings
@@ -230,7 +238,9 @@ public final class DuckLakeCatalogDiscovery {
         // whichever catalog ends up active, so it must not reserve a name yet: with the preferred
         // catalog unreadable and the alias equal to another catalog's default name, that catalog is
         // exactly the one the alias should land on.
-        String preferredName = DuckLakeDataSourceProvider.defaultAlias(db, preferredSchema);
+        String preferredFallback = DuckLakeDataSourceProvider.collisionAlias(primaryDb, preferredSchema);
+        String preferredName = RESERVED_NAMES.contains(preferredSchema)
+            ? preferredFallback : DuckLakeDataSourceProvider.defaultAlias(primaryDb, preferredSchema);
         used.add(preferredName);
 
         boolean preferredExists = ownSchemas.contains(preferredSchema);
@@ -243,7 +253,7 @@ public final class DuckLakeCatalogDiscovery {
         }
 
         if (preferredExists || !dataPath.isEmpty()) {
-            candidates.add(new Candidate(pgConn, preferredSchema, preferredName,
+            candidates.add(new Candidate(pgConn, primaryDb, preferredSchema, preferredName, preferredFallback,
                 "schema '" + preferredSchema + "'", true));
         }
 
@@ -254,8 +264,7 @@ public final class DuckLakeCatalogDiscovery {
                     continue;
                 }
 
-                add(candidates, used, warnings, new Candidate(pgConn, schema,
-                    DuckLakeDataSourceProvider.defaultAlias(db, schema), "schema '" + schema + "'", false));
+                add(candidates, used, warnings, candidate(pgConn, primaryDb, schema, "schema '" + schema + "'"));
             }
         }
 
@@ -271,8 +280,8 @@ public final class DuckLakeCatalogDiscovery {
                     execute(con, "ATTACH " + q(dbConn) + " AS " + id(PROBE_ALIAS) + " (TYPE POSTGRES, READ_ONLY)");
 
                     for (String schema : pgQuery(con, PROBE_ALIAS, DUCKLAKE_SCHEMAS_SQL)) {
-                        add(candidates, used, warnings, new Candidate(dbConn, schema, database + "." + schema,
-                            "schema '" + schema + "' of database '" + database + "'", false));
+                        add(candidates, used, warnings, candidate(dbConn, database, schema,
+                            "schema '" + schema + "' of database '" + database + "'"));
                     }
                 } catch (SQLException e) {
                     // pg_hba rules or a missing role can still refuse a database we may CONNECT to.
@@ -297,6 +306,7 @@ public final class DuckLakeCatalogDiscovery {
         Connection con, List<Candidate> candidates, String dataPath, String alias, List<String> warnings
     ) {
         Map<String, String> attachStatements = new LinkedHashMap<>();
+        Map<String, String> sources = new LinkedHashMap<>();
         Set<String> taken = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         taken.addAll(RESERVED_NAMES);
 
@@ -307,6 +317,12 @@ public final class DuckLakeCatalogDiscovery {
 
         for (Candidate candidate : candidates) {
             String name = active == null && freeAlias != null ? freeAlias : candidate.name();
+
+            if (taken.contains(name) && name.equals(candidate.name())) {
+                // Candidate names are unique already, so only the configured alias can have
+                // claimed this one.
+                name = candidate.fallbackName();
+            }
 
             if (taken.contains(name)) {
                 warnings.add("Skipped the DuckLake catalog in " + candidate.label() + ": the name '" + name
@@ -325,6 +341,7 @@ public final class DuckLakeCatalogDiscovery {
 
             taken.add(name);
             attachStatements.put(name, attachSql);
+            sources.put(name, candidate.database() + "." + candidate.schema());
             attached++;
 
             if (active == null) {
@@ -333,7 +350,7 @@ public final class DuckLakeCatalogDiscovery {
             }
         }
 
-        return new Result(attachStatements, active, attached, skipped, warnings);
+        return new Result(attachStatements, active, attached, skipped, warnings, sources);
     }
 
     /**
@@ -461,7 +478,22 @@ public final class DuckLakeCatalogDiscovery {
         return message == null ? null : PASSWORD_PATTERN.matcher(message).replaceAll("password=***");
     }
 
-    /** Add a catalog unless its name (ignoring case) is taken; a skipped catalog becomes a warning. */
+    /**
+     * A non-preferred catalog, named after its schema. A schema called like a DuckDB built-in
+     * database ({@code memory}, {@code system}, {@code temp}) gets {@code <database>_<schema>}.
+     */
+    private static Candidate candidate(String pgConn, String database, String schema, String label) {
+        String fallback = DuckLakeDataSourceProvider.collisionAlias(database, schema);
+        String name = RESERVED_NAMES.contains(schema) ? fallback : DuckLakeDataSourceProvider.defaultAlias(database, schema);
+        return new Candidate(pgConn, database, schema, name, fallback, label, false);
+    }
+
+    /**
+     * Add a catalog under its schema name or, when an earlier catalog already has that name (ignoring
+     * case), under {@code <database>_<schema>}. Earlier candidates keep the bare name, so the
+     * connection's own database wins over the other databases and the names do not change with the
+     * discovery settings. A catalog whose fallback name is taken too is skipped with a warning.
+     */
     private static void add(
         List<Candidate> candidates, Set<String> used, List<String> warnings, Candidate candidate
     ) {
@@ -470,8 +502,16 @@ public final class DuckLakeCatalogDiscovery {
             return;
         }
 
-        warnings.add("Skipped the DuckLake catalog in " + candidate.label() + ": the name '"
-            + candidate.name() + "' is already taken");
+        String fallback = candidate.fallbackName();
+
+        if (used.add(fallback)) {
+            candidates.add(new Candidate(candidate.pgConn(), candidate.database(), candidate.schema(),
+                fallback, fallback, candidate.label(), candidate.preferred()));
+            return;
+        }
+
+        warnings.add("Skipped the DuckLake catalog in " + candidate.label() + ": the names '"
+            + candidate.name() + "' and '" + fallback + "' are both taken");
     }
 
     private static String trimmed(String value) {

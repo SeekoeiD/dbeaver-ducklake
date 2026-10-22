@@ -26,7 +26,9 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
 
 - The driver is plain DuckDB JDBC. The provider builds the URL itself: it writes a DuckDB
   `session_init_sql_file` under `%TEMP%/dbeaver-ducklake/init-<sha256 prefix>.sql` and returns
-  `jdbc:duckdb:;session_init_sql_file=...;jdbc_pin_db=true;jdbc_stream_results=true;`.
+  `jdbc:duckdb:;session_init_sql_file=...;jdbc_pin_db=true;jdbc_stream_results=false;` (`true` only when
+  the "Stream result sets" option is ticked; streamed results break when DBeaver runs a metadata
+  query mid-fetch).
 - The init file only does INSTALL/LOAD (ducklake, postgres, httpfs) and CREATE OR REPLACE SECRET for
   S3 if any S3 field is set. No ATTACH, no USE, no `DUCKDB_CONNECTION_INIT_BELOW_MARKER`: the URL has
   no database path, and for an in-memory database the driver runs the whole file on every connection
@@ -66,6 +68,10 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
 - DATA_PATH is only offered to the preferred primary, and an ATTACH that fails with "does not match
   existing data path" is retried without it plus a warning. Never use OVERRIDE_DATA_PATH: it rewrites
   the catalog instead of reading it.
+- Catalogs are attached under the bare metadata schema name (`defaultAlias`), so SQL needs no
+  quotes. A name already taken by an earlier candidate, or by the configured alias, falls back to
+  `<database>_<schema>` (`collisionAlias`), never a dotted name. The database shows up in
+  `DuckLakeGenericCatalog.getDescription` (tooltip) from `Result.sources`.
 - `DuckLakeGenericCatalog.isSystem` marks `memory`, `system`, `temp` and the two discovery
   passthrough aliases as system catalogs so DBeaver hides them without an object filter.
 - The query guard lives in `model/guard/`. `DuckLakeDataSource.createJdbcFactory` returns

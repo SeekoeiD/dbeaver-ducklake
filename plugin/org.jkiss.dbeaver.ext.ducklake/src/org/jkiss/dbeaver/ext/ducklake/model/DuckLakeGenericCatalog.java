@@ -29,4 +29,23 @@ public class DuckLakeGenericCatalog extends DuckDBGenericCatalog {
     public boolean isSystem() {
         return INTERNAL.contains(getName());
     }
+
+    /**
+     * The Postgres database and schema the catalog's metadata lives in, e.g.
+     * {@code Postgres ducklake.ethereum}. Catalogs are named after the schema alone, so this is
+     * where the navigator's tooltip (and the description column, when shown) says which database
+     * a catalog comes from.
+     */
+    @Override
+    public String getDescription() {
+        if (getDataSource() instanceof DuckLakeDataSource lake) {
+            String source = lake.getCatalogSource(getName());
+
+            if (source != null) {
+                return "Postgres " + source;
+            }
+        }
+
+        return super.getDescription();
+    }
 }

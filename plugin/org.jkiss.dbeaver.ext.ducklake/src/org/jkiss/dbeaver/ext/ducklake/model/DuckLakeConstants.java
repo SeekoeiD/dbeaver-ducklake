@@ -28,6 +28,12 @@ public final class DuckLakeConstants {
     public static final String PROP_DISCOVER_SCHEMAS = "ducklake.discover_schemas";
     public static final String PROP_DISCOVER_DATABASES = "ducklake.discover_databases";
 
+    /**
+     * DuckDB JDBC {@code jdbc_stream_results}. Off by default: a streamed result set dies as soon as
+     * another statement runs on its connection, which DBeaver's metadata reads do mid-fetch.
+     */
+    public static final String PROP_STREAM_RESULTS = "ducklake.stream_results";
+
     // Generic fallbacks only (not environment-specific).
 
     /** First catalog tried when "Metadata schema" is blank; DuckDB's own METADATA_SCHEMA default. */
