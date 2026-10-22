@@ -28,6 +28,8 @@ import org.jkiss.utils.CommonUtils;
  */
 public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
 
+    private final DuckLakeQueryGuardGroup queryGuard = new DuckLakeQueryGuardGroup();
+
     private Text endpointText;
     private Text keyText;
     private Text secretText;
@@ -85,6 +87,8 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
             lake, "Also discover DuckLake catalogs in other databases on this server",
             "Attached as <database>.<schema>", true, 2);
 
+        queryGuard.create(group);
+
         setControl(group);
         loadSettings();
     }
@@ -92,6 +96,7 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
     @Override
     public void loadSettings() {
         DBPConnectionConfiguration cfg = getSite().getActiveDataSource().getConnectionConfiguration();
+        queryGuard.load(cfg);
         endpointText.setText(CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_ENDPOINT)));
         keyText.setText(CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_KEY)));
         secretText.setText(CommonUtils.notEmpty(cfg.getProviderProperty(DuckLakeConstants.PROP_S3_SECRET)));
@@ -112,6 +117,7 @@ public class DuckLakeConnectionPageAdvanced extends ConnectionPageAbstract {
     @Override
     public void saveSettings(@NotNull DBPDataSourceContainer dataSource) {
         DBPConnectionConfiguration cfg = dataSource.getConnectionConfiguration();
+        queryGuard.save(cfg);
         cfg.setProviderProperty(DuckLakeConstants.PROP_S3_ENDPOINT, endpointText.getText().trim());
         cfg.setProviderProperty(DuckLakeConstants.PROP_S3_KEY, keyText.getText().trim());
         cfg.setProviderProperty(DuckLakeConstants.PROP_S3_SECRET, secretText.getText());

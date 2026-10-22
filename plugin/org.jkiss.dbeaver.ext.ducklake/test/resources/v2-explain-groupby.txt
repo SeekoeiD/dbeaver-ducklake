@@ -1,0 +1,15 @@
+╭─ Hash Group By ────────────╮
+│ Groups: #0                 │
+│ Aggregates: sum(#1)        │
+│ ~758,545 rows              │
+╰──────────────┬─────────────╯
+╭─ Projection ─┴─────────────╮
+│ Projections: asset, amount │
+│ ~1,200,001 rows            │
+╰──────────────┬─────────────╯
+╭─ Ducklake Scan ────────────╮
+│ Table: lake.main.transfers │
+│ Projections: asset, amount │
+│ ~1,200,001 rows            │
+╰────────────────────────────╯
+

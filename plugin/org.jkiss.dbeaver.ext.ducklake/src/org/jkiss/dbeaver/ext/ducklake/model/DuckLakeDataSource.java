@@ -8,6 +8,10 @@ import org.jkiss.code.NotNull;
 import org.jkiss.dbeaver.DBException;
 import org.jkiss.dbeaver.Log;
 import org.jkiss.dbeaver.ext.duckdb.model.DuckDBDataSource;
+import org.jkiss.dbeaver.ext.ducklake.model.guard.QueryGuardJdbcFactory;
+import org.jkiss.dbeaver.ext.ducklake.model.guard.QueryGuardOutputReader;
+import org.jkiss.dbeaver.model.exec.jdbc.JDBCFactory;
+import org.jkiss.dbeaver.model.exec.output.DBCServerOutputReader;
 import org.jkiss.dbeaver.ext.generic.model.GenericCatalog;
 import org.jkiss.dbeaver.ext.generic.model.meta.GenericMetaModel;
 import org.jkiss.dbeaver.model.DBPDataSourceContainer;
@@ -266,5 +270,27 @@ public class DuckLakeDataSource extends DuckDBDataSource {
 
         log.info("DuckLake active catalog '" + result.activeCatalog() + "', " + result.attached()
             + " catalog(s) attached, " + result.skipped() + " skipped");
+    }
+
+    // ------------------------------------------------------------------ query guard
+
+    /**
+     * Statement wrappers that run the query guard around user queries. Called from the
+     * {@code JDBCDataSource} constructor, before any field of this class is set, which is fine: the
+     * factory keeps no state and finds the data source through each session.
+     */
+    @Override
+    protected JDBCFactory createJdbcFactory() {
+        return new QueryGuardJdbcFactory();
+    }
+
+    /** The SQL editor's Output panel reader, which also prints the query guard's measurements. */
+    @Override
+    public <T> T getAdapter(Class<T> adapter) {
+        if (adapter == DBCServerOutputReader.class) {
+            return adapter.cast(new QueryGuardOutputReader());
+        }
+
+        return super.getAdapter(adapter);
     }
 }

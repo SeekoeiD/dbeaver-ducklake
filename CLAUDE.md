@@ -68,6 +68,13 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
   the catalog instead of reading it.
 - `DuckLakeGenericCatalog.isSystem` marks `memory`, `system`, `temp` and the two discovery
   passthrough aliases as system catalogs so DBeaver hides them without an object filter.
+- The query guard lives in `model/guard/`. `DuckLakeDataSource.createJdbcFactory` returns
+  `QueryGuardJdbcFactory`, whose statements run `EXPLAIN (FORMAT json)` plus `ducklake_list_files`
+  before a user query and read `duckdb_logs_parsed('HTTP')` after it is closed (never while its
+  result set is open: a second statement on the connection would kill a streamed result).
+  `getAdapter(DBCServerOutputReader)` prints the measurements in the Output panel. DuckDB 1.5 plans
+  print bare table names, 2.0 plans qualified ones, and DBeaver may resolve the pinned 1.5.4 driver
+  to a 2.0 jar, so keep both working.
 - Connection settings are DBeaver provider properties with keys in `DuckLakeConstants`. The same
   keys are declared in the model bundle's `plugin.xml` and read by the UI page. Add a setting in all
   three places.
@@ -98,8 +105,10 @@ install's `plugins/` folder and packages two jars with `jar`.
   and the seed container pins `DUCKDB_VERSION` in `docker/.env.example`. Keep both on the same
   DuckDB minor line, otherwise the DuckLake catalog format the seed writes may not match what the
   plugin reads. DuckLake v1.0 catalogs need DuckDB 1.5.2 or newer.
-- There are no automated tests. Verification is manual: build, install, restart with `-clean`,
-  connect to the demo stack, expand the tree. The `DuckLakeCatalogDiscovery` class works on a plain
+- `test.ps1` runs the query guard's unit tests (plain `main()`, no JUnit) on the plans captured in
+  `plugin/org.jkiss.dbeaver.ext.ducklake/test/resources`. Everything else is verified manually:
+  build, install, restart with `-clean`, connect to the demo stack, expand the tree. The
+  `DuckLakeCatalogDiscovery` class works on a plain
   JDBC connection and can be exercised outside DBeaver, and the DuckDB Python module reproduces
   what the init file does (see `docker/sql/seed.sql` for the SQL shape).
 

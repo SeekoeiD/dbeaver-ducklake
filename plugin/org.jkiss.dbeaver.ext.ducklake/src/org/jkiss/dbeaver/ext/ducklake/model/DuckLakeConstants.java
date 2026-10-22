@@ -35,6 +35,17 @@ public final class DuckLakeConstants {
 
     public static final String DEF_S3_REGION = "us-east-1";
 
+    // Query guard (see guard/QueryGuard). Both default on / 100 MB when unset, which covers
+    // connections saved by earlier versions.
+
+    /** Estimate object-storage reads before a query runs and ask above the threshold. */
+    public static final String PROP_GUARD_ENABLED = "ducklake.guard.enabled";
+
+    /** Warning threshold in MB (1 MB = 1024 * 1024 bytes). */
+    public static final String PROP_GUARD_THRESHOLD_MB = "ducklake.guard.threshold_mb";
+
+    public static final int DEF_GUARD_THRESHOLD_MB = 100;
+
     private DuckLakeConstants() {
     }
 }

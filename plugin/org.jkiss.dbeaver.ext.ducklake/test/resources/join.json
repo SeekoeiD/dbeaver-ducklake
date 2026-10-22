@@ -1,0 +1,36 @@
+[
+    {
+        "name": "HASH_JOIN",
+        "children": [
+            {
+                "name": "DUCKLAKE_SCAN",
+                "children": [],
+                "extra_info": {
+                    "Table": "transfers",
+                    "Projections": [
+                        "id",
+                        "asset"
+                    ],
+                    "Estimated Cardinality": "1200001"
+                }
+            },
+            {
+                "name": "DUCKLAKE_SCAN",
+                "children": [],
+                "extra_info": {
+                    "Table": "small",
+                    "Projections": [
+                        "id",
+                        "name"
+                    ],
+                    "Estimated Cardinality": "1000"
+                }
+            }
+        ],
+        "extra_info": {
+            "Join Type": "INNER",
+            "Conditions": "id = CAST(id AS BIGINT)",
+            "Estimated Cardinality": "1200001"
+        }
+    }
+]
