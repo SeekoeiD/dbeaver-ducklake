@@ -33,7 +33,12 @@
                         webURL="https://ducklake.select/"
                         description="DuckLake via the DuckDB JDBC driver. Host/Port/Database/User/Password point at the Postgres CATALOG; S3 storage is configured in Driver properties."
                         categories="sql,analytic">
-                    <file type="jar" path="maven:/org.duckdb:duckdb_jdbc:1.5.4.0"/>
+                    <!-- Pinned. DBeaver reads "group:artifact:X" as version RELEASE with X only as an
+                         offline fallback, so a plain "duckdb_jdbc:1.5.4.0" resolves to the newest
+                         release on Maven Central (2.0.0.0 since 2026-10-21) for every driver resolved
+                         after that day. "RELEASE[X]" makes X the preferred version, which DBeaver
+                         downloads exactly (the same form DBeaver's own H2 drivers use). -->
+                    <file type="jar" path="maven:/org.duckdb:duckdb_jdbc:RELEASE[1.5.4.0]"/>
                     <file type="license" path="https://raw.githubusercontent.com/duckdb/duckdb/master/LICENSE"/>
                     <!-- Force our metadata model so the catalog filter (hide DuckDB's internal
                          memory/system/temp catalogs) runs. Without this, DBeaver resolves the model
