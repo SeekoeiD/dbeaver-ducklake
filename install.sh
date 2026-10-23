@@ -19,7 +19,7 @@ fi
 SRC="$(cd "$(dirname "$0")" && pwd)"
 PLUGINS="$DBEAVER/plugins"
 BI="$DBEAVER/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info"
-VERSION=1.3.1
+VERSION=1.3.2
 JARS=(org.jkiss.dbeaver.ext.ducklake_$VERSION.jar org.jkiss.dbeaver.ext.ducklake.ui_$VERSION.jar)
 
 [[ -d "$PLUGINS" ]] || { echo "plugins/ not found under $DBEAVER" >&2; exit 1; }

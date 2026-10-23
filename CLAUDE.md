@@ -79,8 +79,8 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
   before a user query and read `duckdb_logs_parsed('HTTP')` after it is closed (never while its
   result set is open: a second statement on the connection would kill a streamed result).
   `getAdapter(DBCServerOutputReader)` prints the measurements in the Output panel. DuckDB 1.5 plans
-  print bare table names, 2.0 plans qualified ones, and DBeaver may resolve the pinned 1.5.4 driver
-  to a 2.0 jar, so keep both working.
+  print bare table names, 2.0 plans qualified ones, and installs that resolved the driver under
+  plugin 1.3.1 or older may still run a 2.0 jar, so keep both working.
 - Connection settings are DBeaver provider properties with keys in `DuckLakeConstants`. The same
   keys are declared in the model bundle's `plugin.xml` and read by the UI page. Add a setting in all
   three places.
@@ -107,8 +107,12 @@ install's `plugins/` folder and packages two jars with `jar`.
   `configuration/org.eclipse.equinox.simpleconfigurator/bundles.info` and keep a `.orig` backup.
   Always restart DBeaver with `-clean` after install or uninstall.
 - `install.ps1` writes `bundles.info` without a BOM on purpose. A BOM breaks Equinox.
-- The DuckDB JDBC version is pinned in the model `plugin.xml` (`maven:/org.duckdb:duckdb_jdbc:1.5.4.0`)
-  and the seed container pins `DUCKDB_VERSION` in `docker/.env.example`. Keep both on the same
+- The DuckDB JDBC version is pinned in the model `plugin.xml`
+  (`maven:/org.duckdb:duckdb_jdbc:RELEASE[1.5.4.0]`). Keep the `RELEASE[x]` form: DBeaver parses a
+  plain `group:artifact:x` as version RELEASE with `x` only as an offline fallback
+  (`MavenArtifactReference`), which is how 1.3.1 and older floated to DuckDB 2.0 on 2026-10-21. The
+  companion `dbeaver-ducklake-stack` repeats the same path in its generated `ll_*` drivers; change
+  both together. DuckDB 2.0 is not validated (README, Compatibility). The seed container pins `DUCKDB_VERSION` in `docker/.env.example`. Keep both on the same
   DuckDB minor line, otherwise the DuckLake catalog format the seed writes may not match what the
   plugin reads. DuckLake v1.0 catalogs need DuckDB 1.5.2 or newer.
 - `test.ps1` runs the query guard's unit tests (plain `main()`, no JUnit) on the plans captured in
