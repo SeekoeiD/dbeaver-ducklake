@@ -418,6 +418,21 @@ public final class QueryGuardTest {
         check(QueryGuardEstimate.filterBounds("height=5 OR height=9").isEmpty(), "bounds: OR rules nothing out");
         check(QueryGuardEstimate.filterBounds("contains(payload, 'height=5')").isEmpty(),
             "bounds: a comparison inside a string literal is not a bound");
+        check(QueryGuardEstimate.filterBounds("((height = 5) IS NOT DISTINCT FROM false)").isEmpty(),
+            "bounds: a comparison inside IS NOT DISTINCT FROM is not a bound (WHERE (height = 5) IS FALSE)");
+        check(QueryGuardEstimate.filterBounds("(CASE WHEN (height = 5) THEN 1 ELSE 0 END = 1)").isEmpty(),
+            "bounds: a comparison inside CASE is not a bound");
+        check(QueryGuardEstimate.filterBounds("(COALESCE(height, 0) = 5)").isEmpty(),
+            "bounds: a comparison on COALESCE is not a bound");
+        check(QueryGuardEstimate.filterBounds("(NOT (height = 5))").isEmpty(), "bounds: NOT is not a bound");
+        check(QueryGuardEstimate.filterBounds("height>=10 AND ((height = 5) IS NOT DISTINCT FROM false) AND (height=5 OR height=9)")
+            .equals(Map.of("height", new QueryGuardEstimate.Range(java.math.BigInteger.TEN, null))),
+            "bounds: only the bare conjunct counts, the wrapped and the OR ones are ignored");
+        check(QueryGuardEstimate.filterBounds("((height >= 10) AND (height <= 20))").equals(Map.of("height", range(10, 20))),
+            "bounds: parentheses around the whole conjunction are taken off");
+        check(QueryGuardEstimate.filterBounds("(height >= 10) AND (height <= 20) AND band = 3")
+            .equals(Map.of("height", range(10, 20), "band", range(3, 3))),
+            "bounds: a column whose name contains 'and' is not split");
         check(QueryGuardEstimate.filterBounds("height>=10 AND contains(payload, 'it''s height=5 OR 1')")
             .equals(Map.of("height", new QueryGuardEstimate.Range(java.math.BigInteger.TEN, null))),
             "bounds: a literal with a doubled quote and an OR inside it is blanked, the real bound stays");

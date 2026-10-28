@@ -473,56 +473,133 @@ public final class QueryGuardEstimate {
     // ------------------------------------------------------------------ filter bounds
 
     /**
-     * {@code column op integer} as DuckDB prints a pushed-down filter: {@code height>=975000} in 1.5,
-     * {@code (height >= 975000)} in 2.0, the column possibly quoted. A cast on the column side
-     * ({@code CAST(height AS DECIMAL(20,1)) < 980000.5}) and a decimal or string constant do not
-     * match, so those conjuncts are ignored, which only makes the bound looser. String literals are
-     * blanked out before matching: {@code contains(payload, 'height=5')} must not read as a bound on
-     * {@code height} (found by a local Codex review), since a bound that is not there excludes files
-     * and hides a full read.
+     * A whole conjunct that is {@code column op integer}, as DuckDB prints a pushed-down filter:
+     * {@code height>=975000} in 1.5, {@code (height >= 975000)} in 2.0 (the parentheses are taken
+     * off first), the column possibly quoted. Matched against the entire conjunct, never searched
+     * for inside one: {@code (height = 5) IS NOT DISTINCT FROM false} (what 1.5.4 pushes down for
+     * {@code WHERE (height = 5) IS FALSE}), a CASE or COALESCE around the comparison, a NOT, an OR,
+     * a cast on the column side or a decimal constant all leave the conjunct unmatched, and an
+     * unmatched conjunct is ignored, which only makes the bound looser. Reading a bound out of such
+     * a conjunct would rule files out that hold matching rows and hide a full read behind a small
+     * estimate (found by a local Codex review, two rounds).
      */
     private static final Pattern BOUND = Pattern.compile(
-        "(?<![\\w.\"])\"?([A-Za-z_][A-Za-z0-9_]*)\"?\\s*(>=|<=|=|>|<)\\s*(-?[0-9]+)(?![\\w.])");
+        "\\s*\"?([A-Za-z_][A-Za-z0-9_]*)\"?\\s*(>=|<=|=|>|<)\\s*(-?[0-9]+)\\s*");
 
-    private static final Pattern OR = Pattern.compile("(?i)\\bOR\\b");
-
-    /** A single-quoted SQL string, doubled quotes included. */
+    /**
+     * A single-quoted SQL string, doubled quotes included. Blanked out before parsing, so that
+     * {@code contains(payload, 'height=5')} holds no comparison and no AND or parenthesis inside a
+     * literal can split or unbalance a conjunct.
+     */
     private static final Pattern STRING_LITERAL = Pattern.compile("'(?:[^']|'')*'");
 
     /**
      * The integer ranges a scan's filter text puts on its columns, keyed by lower-case column name.
-     * Pushed-down filters are a conjunction, so each comparison narrows its column. Empty when the
-     * text holds an OR anywhere: then a comparison need not hold for every row, and the files cannot
-     * be ruled out by it.
+     * The text, with the parentheses around the whole of it taken off, is split into its top-level
+     * AND conjuncts, each of which must hold for every row, and each conjunct is unwrapped and split
+     * the same way ({@code ((a) AND (b))} is how 1.5.4 prints a wrapped conjunction). Only a conjunct
+     * that is nothing but one comparison ({@link #BOUND}) narrows its column. Empty when no conjunct
+     * is one.
      */
     public static Map<String, Range> filterBounds(String filterText) {
         Map<String, Range> bounds = new LinkedHashMap<>();
 
-        if (filterText == null) {
-            return bounds;
-        }
-
-        String text = STRING_LITERAL.matcher(filterText).replaceAll(" ");
-
-        if (OR.matcher(text).find()) {
-            return bounds;
-        }
-
-        Matcher m = BOUND.matcher(text);
-
-        while (m.find()) {
-            BigInteger value = new BigInteger(m.group(3));
-            Range range = switch (m.group(2)) {
-                case "=" -> new Range(value, value);
-                case ">=" -> new Range(value, null);
-                case ">" -> new Range(value.add(BigInteger.ONE), null);
-                case "<=" -> new Range(null, value);
-                default -> new Range(null, value.subtract(BigInteger.ONE));
-            };
-            bounds.merge(m.group(1).toLowerCase(Locale.ROOT), range, Range::intersect);
+        if (filterText != null) {
+            collectBounds(STRING_LITERAL.matcher(filterText).replaceAll(" "), bounds);
         }
 
         return bounds;
+    }
+
+    private static void collectBounds(String text, Map<String, Range> bounds) {
+        String bare = unwrap(text);
+        List<String> parts = conjuncts(bare);
+
+        if (parts.size() > 1) {
+            for (String part : parts) {
+                collectBounds(part, bounds);
+            }
+
+            return;
+        }
+
+        Matcher m = BOUND.matcher(bare);
+
+        if (!m.matches()) {
+            return;
+        }
+
+        BigInteger value = new BigInteger(m.group(3));
+        Range range = switch (m.group(2)) {
+            case "=" -> new Range(value, value);
+            case ">=" -> new Range(value, null);
+            case ">" -> new Range(value.add(BigInteger.ONE), null);
+            case "<=" -> new Range(null, value);
+            default -> new Range(null, value.subtract(BigInteger.ONE));
+        };
+        bounds.merge(m.group(1).toLowerCase(Locale.ROOT), range, Range::intersect);
+    }
+
+    /** The text split at the ANDs outside every parenthesis; an AND inside parentheses stays put. */
+    static List<String> conjuncts(String text) {
+        List<String> parts = new ArrayList<>();
+        int depth = 0;
+        int start = 0;
+
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+            } else if (depth == 0 && text.regionMatches(true, i, "AND", 0, 3)
+                && (i == 0 || !isWordChar(text.charAt(i - 1)))
+                && (i + 3 >= text.length() || !isWordChar(text.charAt(i + 3)))) {
+                parts.add(text.substring(start, i));
+                start = i + 3;
+                i += 2;
+            }
+        }
+
+        parts.add(text.substring(start));
+        return parts;
+    }
+
+    /** {@code ((x))} as {@code x}: parentheses that wrap the whole conjunct, however many. */
+    static String unwrap(String conjunct) {
+        String s = conjunct.trim();
+
+        while (s.length() >= 2 && s.charAt(0) == '(' && s.charAt(s.length() - 1) == ')' && closesAtEnd(s)) {
+            s = s.substring(1, s.length() - 1).trim();
+        }
+
+        return s;
+    }
+
+    /** Whether the opening parenthesis at index 0 is closed by the last character and not earlier. */
+    private static boolean closesAtEnd(String s) {
+        int depth = 0;
+
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+
+                if (depth == 0) {
+                    return i == s.length() - 1;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static boolean isWordChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '"';
     }
 
     /** A catalog statistic as an integer, or null when it is missing or not an integer. */
