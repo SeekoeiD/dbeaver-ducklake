@@ -27,18 +27,18 @@ chain), or a local-filesystem lake — empty fields are simply omitted from the 
   DBeaver's internal `org.jkiss.dbeaver.ext.duckdb` and `…ext.generic` APIs, which ship with
   DBeaver — so it needs a DBeaver version with compatible APIs. Other versions may require a rebuild
   (see [Build from source](#build-from-source)).
-- Uses the DuckDB JDBC driver **1.5.4.0**, pinned exactly (pulled from Maven on first connect).
-  DuckLake v1.0 needs DuckDB ≥ 1.5.2. Plugin 1.3.1 and older declared the version in a form DBeaver
-  treats as "newest release", so a driver first resolved after 2026-10-21 got **2.0.0.0** instead;
-  see [Troubleshooting](#troubleshooting).
-- **DuckDB 2.0 is not validated yet.** It reads our DuckLake 1.0 catalogs, but it splits every
-  remote read into 2 MiB blocks fetched in parallel (the new external file cache). In our
-  measurement (one Bitcoin block of `vins`, one 15.4 MiB Parquet file on R2) that meant 13 GETs
-  instead of 5 for the same bytes, a `Table Scan` reported at 38–44 s in `EXPLAIN ANALYZE` instead of
-  about 4 s (time summed over DuckDB's threads, which DBeaver leaves at one per core), and 10–30%
-  more wall time. On a 100-block read at 32 threads (60 MB, 43 GETs instead of 10), 4 of 11 runs
-  stalled on a single GET and took 29–46 s instead of about 7.5 s; 1.5.4 and 1.5.6 never did in 12
-  runs. The pin stays until 2.0 measures at least as well.
+- Uses the DuckDB JDBC driver **2.0.0.0**, pinned exactly (pulled from Maven on first connect).
+  DuckLake v1.0 needs DuckDB ≥ 1.5.2 and 2.0 reads DuckLake 1.0 catalogs as they are. Plugin 1.3.1
+  and older declared the version in a form DBeaver treats as "newest release"; 1.3.2 to 1.4.0 pinned
+  1.5.4.0; 1.4.1 moves to 2.0 (see [Troubleshooting](#troubleshooting) if `SELECT version()` does not
+  say `v2.0.0` after the upgrade).
+- **DuckDB 2.0's remote reads are tuned in the session init SQL.** 2.0 splits every remote read into
+  2 MiB blocks fetched in parallel (its external file cache) and reads ahead. Measured on a 56 MB
+  Parquet file behind 120 ms of latency: a two-column scan took 28 GETs instead of 1.5's 10, and the
+  data editor's first page of 200 rows fetched the whole file (31 to 33 GETs, 56 MB) instead of 25 MB
+  in 5. With `external_file_cache_remote_max_block_size` at 64 MiB the same scan is 1 GET, and with
+  `read_ahead_depth = 0` the first page is back to 1.5's bytes; the plugin sets both on every
+  connection. On a low-latency client next to the storage, 2.0's defaults are as fast or faster.
 
 ## Install
 
@@ -245,15 +245,12 @@ not come back until you open the table in a new editor.
 
 ## Troubleshooting
 
-- **A connection made after 2026-10-21 is much slower on object storage than an older one**, with
-  many more requests in the query guard's line or in `EXPLAIN ANALYZE` (13 GETs where an older
-  connection needs 4 or 5). `SELECT version()` returns `v2.0.0`. Plugin 1.3.1 and older declared the
-  driver as `duckdb_jdbc:1.5.4.0`, which DBeaver reads as "latest release, 1.5.4.0 only when
-  offline", so every driver it resolved after DuckDB 2.0 came out got the 2.0 jar. Install 1.3.2 or
-  newer and restart DBeaver with `-clean`: the driver's library entry changes, DBeaver drops the
-  stored 2.0 resolution, and the next connect opens the driver download dialog once: click
-  **Download** (it reuses a cached 1.5.4.0 jar when there is one). If `version()` still
-  says 2.0, open **Database > Driver Manager**, edit the DuckLake driver, and on the Libraries tab
+- **`SELECT version()` still says `v1.5.4` after installing 1.4.1**, or the connection fails on
+  `SET external_file_cache_remote_max_block_size` (a 1.5 driver does not know the 2.0 settings).
+  Restart DBeaver with `-clean`: the driver's library entry changed, DBeaver drops the stored
+  resolution, and the next connect opens the driver download dialog once: click **Download** (it
+  reuses a cached 2.0.0.0 jar when there is one). If it still says 1.5.4, open **Database > Driver
+  Manager**, edit the DuckLake driver, and on the Libraries tab
   click **Reset to defaults**.
 - **The connection dialog shows only Main and Driver properties, with no DuckLake storage (S3)
   tab**, and connecting fails with `Secret Validation Failure ... Credential Chain: 'config'`. DBeaver

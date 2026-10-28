@@ -79,8 +79,10 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
   before a user query and read `duckdb_logs_parsed('HTTP')` after it is closed (never while its
   result set is open: a second statement on the connection would kill a streamed result).
   `getAdapter(DBCServerOutputReader)` prints the measurements in the Output panel. DuckDB 1.5 plans
-  print bare table names, 2.0 plans qualified ones, and installs that resolved the driver under
-  plugin 1.3.1 or older may still run a 2.0 jar, so keep both working.
+  print bare table names, 2.0 plans qualified ones; the driver is pinned to 2.0.0.0 since 1.4.1
+  (1.5.4.0 from 1.3.2 to 1.4.0), so keep both working. The init SQL sets
+  `external_file_cache_remote_max_block_size` (64 MiB) and `read_ahead_depth` (0), which only 2.0
+  knows: a 1.5 driver fails to connect with them, so the pin and those lines move together.
 - The guard reads file statistics from DuckLake's metadata tables (`guard/CatalogStats`): one
   `postgres_query` against `__ducklake_metadata_<catalog>`, in the metadata schema discovery
   recorded (`DuckLakeDataSource.getMetadataSchema`). It prunes filtered scans with integer bounds,

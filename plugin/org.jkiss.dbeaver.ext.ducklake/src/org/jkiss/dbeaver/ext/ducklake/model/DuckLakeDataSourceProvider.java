@@ -117,6 +117,17 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
         StringBuilder b = new StringBuilder(512);
         b.append("INSTALL ducklake; LOAD ducklake;\n");
         b.append("INSTALL postgres; LOAD postgres;\n");
+        // DuckDB 2.0 (the pinned driver) splits every remote read into blocks of
+        // external_file_cache_remote_max_block_size (2 MiB) fetched in parallel, and reads ahead
+        // (read_ahead_depth = -1, automatic). From a high-latency client that was 28 to 37 GETs for
+        // a 56 MB file and the whole file for a first page of 200 rows, against 1.5's 10 and 5
+        // (ledgerlink-ducklake-docs experiments/duckdb2-validation, 2026-10-24). A 64 MiB block
+        // reads the file in one GET and no read-ahead brings the first page back to 1.5's bytes.
+        // Both settings exist only in 2.0: on a 1.5 driver the SET fails and the connection with
+        // it, so the driver pin in plugin.xml and these two lines move together.
+        b.append("SET external_file_cache_remote_max_block_size = 67108864;\n");
+        b.append("SET read_ahead_depth = 0;\n");
+
         if (useS3) {
             b.append("INSTALL httpfs;   LOAD httpfs;\n");
 
