@@ -62,9 +62,9 @@ public final class CatalogStats {
 
     /**
      * Every top-level column of the table, in table order, with the min/max of the table's newest
-     * live data file. With preferred column names, newest is the file whose statistics for any of
-     * those (integer) columns reach the highest, ties and files without such statistics going to
-     * the last committed: in a table sorted by such a column the file committed last is often an
+     * live data file. With preferred column names, newest is the file whose statistics for the
+     * first of those names the table has as a top-level integer column reach the highest, ties and
+     * files without such statistics going to the last committed: in a table sorted by such a column the file committed last is often an
      * old range that compaction rewrote. Without names it is simply the file committed last. No
      * file, or no statistics for a column, gives null min/max.
      *
@@ -77,7 +77,8 @@ public final class CatalogStats {
      */
     public static String newestFileSql(String metadataSchema, String schema, String table, List<String> preferred) {
         String m = pgIdentifier(metadataSchema) + ".";
-        StringJoiner names = new StringJoiner(", ", "(", ")");
+        // ARRAY[...] of the names in preference order: array_position ranks the table's columns by it
+        StringJoiner names = new StringJoiner(", ", "ARRAY[", "]");
         boolean anyName = false;
 
         for (String name : preferred) {
@@ -95,9 +96,12 @@ public final class CatalogStats {
         String newest;
 
         if (anyName) {
+            // one column: the first preferred name the table has as a top-level integer column, so
+            // files are ranked on that column alone and never on a mix of unrelated scales
             newest = " hcols AS (SELECT c.column_id FROM " + m + "ducklake_column c JOIN tbl ON tbl.table_id = c.table_id"
                 + " WHERE c.end_snapshot IS NULL AND c.parent_column IS NULL"
-                + " AND lower(c.column_name) IN " + names + " AND c.column_type IN " + integerTypes() + "),"
+                + " AND lower(c.column_name) = ANY (" + names + ") AND c.column_type IN " + integerTypes()
+                + " ORDER BY array_position(" + names + ", lower(c.column_name)), c.column_order LIMIT 1),"
                 + " tops AS (SELECT st.data_file_id, max(CASE WHEN st.max_value ~ '^-?[0-9]+$' THEN st.max_value::numeric END) AS top"
                 + " FROM " + m + "ducklake_file_column_stats st JOIN tbl ON tbl.table_id = st.table_id"
                 + " JOIN files USING (data_file_id) JOIN hcols USING (column_id) GROUP BY st.data_file_id),"

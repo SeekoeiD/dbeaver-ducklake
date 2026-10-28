@@ -497,7 +497,10 @@ public final class QueryGuardTest {
         check(newest.contains("lower('o''brien')"), "newest sql: quoted table\n" + newest);
         check(newest.contains("ORDER BY tops.top DESC NULLS LAST, f.begin_snapshot DESC, f.data_file_id DESC LIMIT 1"),
             "newest sql: the file with the highest preferred column, else the last committed\n" + newest);
-        check(newest.contains("lower(c.column_name) IN ('height', 'seq''no')"),
+        check(newest.contains("lower(c.column_name) = ANY (ARRAY['height', 'seq''no'])")
+                && newest.contains("ORDER BY array_position(ARRAY['height', 'seq''no'], lower(c.column_name)), c.column_order LIMIT 1"),
+            "newest sql: files are ranked on the first preferred column the table has, never on a mix (Codex)\n" + newest);
+        check(newest.contains("lower(c.column_name) = ANY (ARRAY['height', 'seq''no'])"),
             "newest sql: the preferred names, lower-cased and quoted, decide\n" + newest);
         check(newest.contains("CASE WHEN st.max_value ~ '^-?[0-9]+$' THEN st.max_value::numeric END"),
             "newest sql: only numeric statistics are cast\n" + newest);
