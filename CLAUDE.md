@@ -85,7 +85,11 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
   `postgres_query` against `__ducklake_metadata_<catalog>`, in the metadata schema discovery
   recorded (`DuckLakeDataSource.getMetadataSchema`). It prunes filtered scans with integer bounds,
   and counts a LIMIT-stopped scan as every file's footer plus the largest file (measured: DuckDB
-  1.5.4 opens every footer at 1, 4 and 32 threads alike).
+  1.5.4 opens every footer at 1, 4 and 32 threads alike). Write every catalog query as CTEs that
+  join `ducklake_file_column_stats` once to the table's live files, never a subquery per file:
+  the catalog has no index on that table (litecoin: 186k rows), a per-file `NOT EXISTS` took
+  107 s on the catalog mirror and a per-file LATERAL over 4 minutes, and DuckDB JDBC's
+  `cancel()` does not interrupt a running `postgres_query`, so no deadline saves a slow one.
 - Tables are `DuckLakeTable` (`DuckLakeMetaModel.createTableOrViewImpl`). Its `readData` gives the
   data editor's first read of a table a WHERE on the newest data file's height range
   (`guard/NewestFileFilter`), because DuckDB JDBC ignores `setMaxRows` and double-click would
