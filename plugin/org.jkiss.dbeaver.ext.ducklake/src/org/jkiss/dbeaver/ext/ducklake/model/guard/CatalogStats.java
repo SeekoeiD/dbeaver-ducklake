@@ -60,66 +60,58 @@ public final class CatalogStats {
     // ------------------------------------------------------------------ SQL
 
     /**
-     * Every top-level column of the table, in table order, with the min/max of the newest live data
-     * file. Newest means the file whose {@code height} or {@code blockheight} statistics reach the
-     * highest, i.e. the file at the chain tip; a table without such a column falls back to the file
-     * with the highest {@code begin_snapshot}, the last one committed. The last commit is not the tip
-     * on our lakes: the hourly range-rewrite job and DuckLake's merges rewrite old height ranges, so
-     * the file committed last is often an old bucket, and a backfill commits beside the tip follower.
-     * No file, or no statistics for a column, gives null min/max.
+     * Every top-level column of the table, in table order, with the min/max of the table's newest
+     * live data file: the file whose {@code height}/{@code blockheight} statistics reach the
+     * highest (the chain tip; the file committed last is often an old range the hourly rewrite
+     * merged), else the last one committed. No file, or no statistics for a column, gives null
+     * min/max.
+     *
+     * <p>Written as hash joins over the table's files, never as a subquery per file: the catalog's
+     * {@code ducklake_file_column_stats} has no index (186,626 rows for litecoin, 2,943 files in
+     * {@code bronze.vouts}), and a per-file subquery over it ran for more than four minutes on the
+     * catalog mirror, while this form takes 0.85 s.
      */
     public static String newestFileSql(String metadataSchema, String schema, String table) {
         String m = pgIdentifier(metadataSchema) + ".";
-        return "SELECT c.column_name, c.column_type,"
+        return "WITH tbl AS (" + liveTable(m, schema, table) + "),"
+            + " files AS (SELECT f.data_file_id, f.begin_snapshot FROM " + m + "ducklake_data_file f"
+            + " JOIN tbl ON tbl.table_id = f.table_id WHERE f.end_snapshot IS NULL),"
+            + " hcols AS (SELECT c.column_id FROM " + m + "ducklake_column c JOIN tbl ON tbl.table_id = c.table_id"
+            + " WHERE c.end_snapshot IS NULL AND c.parent_column IS NULL"
+            + " AND lower(c.column_name) IN ('height', 'blockheight') AND c.column_type IN " + integerTypes() + "),"
+            + " tops AS (SELECT st.data_file_id, max(CASE WHEN st.max_value ~ '^-?[0-9]+$' THEN st.max_value::numeric END) AS top"
+            + " FROM " + m + "ducklake_file_column_stats st JOIN tbl ON tbl.table_id = st.table_id"
+            + " JOIN files USING (data_file_id) JOIN hcols USING (column_id) GROUP BY st.data_file_id),"
+            + " nf AS (SELECT f.data_file_id FROM files f LEFT JOIN tops USING (data_file_id)"
+            + " ORDER BY tops.top DESC NULLS LAST, f.begin_snapshot DESC, f.data_file_id DESC LIMIT 1)"
+            + " SELECT c.column_name, c.column_type,"
             + " EXISTS (SELECT 1 FROM " + m + "ducklake_partition_column pc"
             + " JOIN " + m + "ducklake_partition_info pi ON pi.partition_id = pc.partition_id AND pi.table_id = pc.table_id"
-            + " WHERE pc.table_id = t.table_id AND pc.column_id = c.column_id AND pc.transform = 'identity'"
+            + " WHERE pc.table_id = c.table_id AND pc.column_id = c.column_id AND pc.transform = 'identity'"
             + " AND pi.end_snapshot IS NULL) AS is_partition,"
             + " st.min_value, st.max_value"
-            + " FROM " + m + "ducklake_table t"
-            + " JOIN " + m + "ducklake_schema s ON s.schema_id = t.schema_id AND s.end_snapshot IS NULL"
-            + " JOIN " + m + "ducklake_column c ON c.table_id = t.table_id AND c.end_snapshot IS NULL"
-            + " AND c.parent_column IS NULL"
-            + " LEFT JOIN LATERAL (SELECT f.data_file_id FROM " + m + "ducklake_data_file f"
-            + " LEFT JOIN LATERAL (SELECT max(CASE WHEN hs.max_value ~ '^-?[0-9]+$' THEN hs.max_value::numeric END) AS top"
-            + " FROM " + m + "ducklake_file_column_stats hs"
-            + " JOIN " + m + "ducklake_column hc ON hc.table_id = hs.table_id AND hc.column_id = hs.column_id"
-            + " AND hc.end_snapshot IS NULL"
-            + " WHERE hs.data_file_id = f.data_file_id AND hs.table_id = f.table_id"
-            + " AND lower(hc.column_name) IN ('height', 'blockheight')) h ON true"
-            + " WHERE f.table_id = t.table_id AND f.end_snapshot IS NULL"
-            + " ORDER BY h.top DESC NULLS LAST, f.begin_snapshot DESC, f.data_file_id DESC LIMIT 1) nf ON true"
-            + " LEFT JOIN " + m + "ducklake_file_column_stats st ON st.data_file_id = nf.data_file_id"
-            + " AND st.table_id = t.table_id AND st.column_id = c.column_id"
-            + " WHERE t.end_snapshot IS NULL" + tableMatch(schema, table)
+            + " FROM " + m + "ducklake_column c JOIN tbl ON tbl.table_id = c.table_id"
+            + " LEFT JOIN " + m + "ducklake_file_column_stats st ON st.table_id = c.table_id"
+            + " AND st.column_id = c.column_id AND st.data_file_id = (SELECT data_file_id FROM nf)"
+            + " WHERE c.end_snapshot IS NULL AND c.parent_column IS NULL"
             + " ORDER BY c.column_order";
     }
 
     /**
      * Count and size the live data files whose statistics overlap every bound, plus their delete
-     * files. A file is ruled out only by an integer column whose min and max are both integers and
-     * lie wholly outside the bound; missing or non-integer statistics keep it, so the result never
-     * undercounts what DuckLake will open. The CASE keeps Postgres from casting text that is not a
-     * number.
+     * files. A file is ruled out only by a top-level integer column whose min and max are both
+     * integers and lie wholly outside the bound; missing or non-integer statistics keep it, so the
+     * result never undercounts what DuckLake will open. The regex guards keep Postgres from casting
+     * text that is not a number (a struct field of the same name is skipped by
+     * {@code parent_column IS NULL}: its statistics must not rule the file out).
+     *
+     * <p>Hash joins, not a {@code NOT EXISTS} per file: see {@link #newestFileSql}; the per-file
+     * form ran 107 s on the catalog mirror for litecoin's vouts, this one 1.5 s.
      */
     public static String prunedFilesSql(String metadataSchema, String schema, String table,
                                         Map<String, QueryGuardEstimate.Range> bounds) {
         String m = pgIdentifier(metadataSchema) + ".";
-        // postgres_query needs distinct column names.
-        StringBuilder sql = new StringBuilder("SELECT count(*) AS files, coalesce(sum(f.file_size_bytes), 0) AS data_bytes,"
-            + " coalesce(sum(del.bytes), 0) AS delete_bytes"
-            + " FROM " + m + "ducklake_data_file f"
-            + " JOIN " + m + "ducklake_table t ON t.table_id = f.table_id AND t.end_snapshot IS NULL"
-            + " JOIN " + m + "ducklake_schema s ON s.schema_id = t.schema_id AND s.end_snapshot IS NULL"
-            + " LEFT JOIN LATERAL (SELECT sum(d.file_size_bytes) AS bytes FROM " + m + "ducklake_delete_file d"
-            + " WHERE d.data_file_id = f.data_file_id AND d.end_snapshot IS NULL) del ON true"
-            + " WHERE f.end_snapshot IS NULL" + tableMatch(schema, table));
-
-        StringJoiner types = new StringJoiner(", ", "(", ")");
-
-        for (String type : INTEGER_TYPES) {
-            types.add(pgLiteral(type));
-        }
+        List<String> excluded = new ArrayList<>();
 
         for (Map.Entry<String, QueryGuardEstimate.Range> bound : bounds.entrySet()) {
             QueryGuardEstimate.Range range = bound.getValue();
@@ -137,20 +129,46 @@ public final class CatalogStats {
                 continue;
             }
 
-            sql.append(" AND NOT EXISTS (SELECT 1 FROM ").append(m).append("ducklake_file_column_stats st")
-                .append(" JOIN ").append(m).append("ducklake_column c ON c.table_id = st.table_id")
-                .append(" AND c.column_id = st.column_id AND c.end_snapshot IS NULL")
-                .append(" WHERE st.data_file_id = f.data_file_id AND st.table_id = f.table_id")
-                .append(" AND lower(c.column_name) = lower(").append(pgLiteral(bound.getKey())).append(")")
-                // top-level columns only: a struct field of the same name has its own statistics,
-                // and under NOT EXISTS an out-of-range field would rule the file out (Codex review)
-                .append(" AND c.parent_column IS NULL")
-                .append(" AND c.column_type IN ").append(types)
-                .append(" AND CASE WHEN st.min_value ~ '^-?[0-9]+$' AND st.max_value ~ '^-?[0-9]+$'")
-                .append(" THEN ").append(String.join(" OR ", outside)).append(" ELSE false END)");
+            excluded.add("SELECT st.data_file_id FROM " + m + "ducklake_file_column_stats st"
+                + " JOIN tbl ON tbl.table_id = st.table_id JOIN files USING (data_file_id)"
+                + " JOIN " + m + "ducklake_column c ON c.table_id = st.table_id AND c.column_id = st.column_id"
+                + " AND c.end_snapshot IS NULL AND c.parent_column IS NULL"
+                + " WHERE lower(c.column_name) = lower(" + pgLiteral(bound.getKey()) + ")"
+                + " AND c.column_type IN " + integerTypes()
+                + " AND st.min_value ~ '^-?[0-9]+$' AND st.max_value ~ '^-?[0-9]+$'"
+                + " AND (" + String.join(" OR ", outside) + ")");
         }
 
-        return sql.toString();
+        String kept = excluded.isEmpty()
+            ? "SELECT * FROM files"
+            : "SELECT * FROM files WHERE data_file_id NOT IN (" + String.join(" UNION ", excluded) + ")";
+
+        // postgres_query needs distinct column names.
+        return "WITH tbl AS (" + liveTable(m, schema, table) + "),"
+            + " files AS (SELECT f.data_file_id, f.file_size_bytes FROM " + m + "ducklake_data_file f"
+            + " JOIN tbl ON tbl.table_id = f.table_id WHERE f.end_snapshot IS NULL),"
+            + " kept AS (" + kept + ")"
+            + " SELECT (SELECT count(*) FROM kept) AS files,"
+            + " (SELECT coalesce(sum(file_size_bytes), 0) FROM kept) AS data_bytes,"
+            + " (SELECT coalesce(sum(d.file_size_bytes), 0) FROM " + m + "ducklake_delete_file d"
+            + " JOIN kept ON kept.data_file_id = d.data_file_id WHERE d.end_snapshot IS NULL) AS delete_bytes";
+    }
+
+    /** The live table's id by schema and table name, compared case-insensitively like DuckDB does. */
+    private static String liveTable(String m, String schema, String table) {
+        return "SELECT t.table_id FROM " + m + "ducklake_table t"
+            + " JOIN " + m + "ducklake_schema s ON s.schema_id = t.schema_id AND s.end_snapshot IS NULL"
+            + " WHERE t.end_snapshot IS NULL" + tableMatch(schema, table);
+    }
+
+    private static String integerTypes() {
+        StringJoiner types = new StringJoiner(", ", "(", ")");
+
+        for (String type : INTEGER_TYPES) {
+            types.add(pgLiteral(type));
+        }
+
+        return types.toString();
     }
 
     /** DuckDB SQL that runs a Postgres statement on catalog {@code catalog}'s metadata database. */

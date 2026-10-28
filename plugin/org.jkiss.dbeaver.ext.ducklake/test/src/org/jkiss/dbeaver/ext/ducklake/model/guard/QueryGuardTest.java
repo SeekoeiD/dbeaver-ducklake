@@ -474,26 +474,35 @@ public final class QueryGuardTest {
         bounds.put("height_bucket", new QueryGuardEstimate.Range(null, BigInteger.ZERO));
         String sql = CatalogStats.prunedFilesSql("bronze", "main", "raw_responses", bounds);
 
-        check(sql.startsWith("SELECT count(*) AS files,"), "pruned sql: distinct column names for postgres_query\n" + sql);
+        check(sql.contains(" AS files,") && sql.contains(" AS data_bytes,") && sql.contains(" AS delete_bytes"),
+            "pruned sql: distinct column names for postgres_query\n" + sql);
         check(sql.contains("FROM \"bronze\".ducklake_data_file f"), "pruned sql: metadata schema quoted\n" + sql);
         check(sql.contains("lower(t.table_name) = lower('raw_responses')"), "pruned sql: table\n" + sql);
-        check(sql.contains("THEN st.max_value::numeric < 975000 OR st.min_value::numeric > 999999 ELSE false END"),
+        check(sql.contains("AND (st.max_value::numeric < 975000 OR st.min_value::numeric > 999999)"),
             "pruned sql: height range\n" + sql);
-        check(sql.contains("THEN st.min_value::numeric > 0 ELSE false END"), "pruned sql: open lower end\n" + sql);
+        check(sql.contains("AND (st.min_value::numeric > 0)"), "pruned sql: open lower end\n" + sql);
         check(sql.contains("c.column_type IN ('int8', 'int16', 'int32', 'int64'"), "pruned sql: integer columns only\n" + sql);
-        check(sql.contains("AND c.parent_column IS NULL AND c.column_type IN"), "pruned sql: top-level columns only\n" + sql);
+        check(sql.contains("AND c.end_snapshot IS NULL AND c.parent_column IS NULL"), "pruned sql: top-level columns only\n" + sql);
         check(sql.contains("f.end_snapshot IS NULL") && sql.contains("d.end_snapshot IS NULL"), "pruned sql: live files only");
+        check(sql.contains("st.min_value ~ '^-?[0-9]+$' AND st.max_value ~ '^-?[0-9]+$' AND ("),
+            "pruned sql: only numeric statistics are cast\n" + sql);
+        check(sql.contains("NOT IN (SELECT st.data_file_id") && sql.contains(" UNION SELECT st.data_file_id"),
+            "pruned sql: one set of ruled-out files per bound, joined, never a subquery per file\n" + sql);
+        check(!sql.contains("NOT EXISTS") && !sql.contains("LATERAL"), "pruned sql: no per-file subquery\n" + sql);
+        check(CatalogStats.prunedFilesSql("bronze", "main", "raw_responses", Map.of()).contains("kept AS (SELECT * FROM files)"),
+            "pruned sql: no bound keeps every file");
 
         String newest = CatalogStats.newestFileSql("my\"meta", "main", "o'brien");
         check(newest.contains("FROM \"my\"\"meta\".ducklake_table t"), "newest sql: quoted schema\n" + newest);
         check(newest.contains("lower('o''brien')"), "newest sql: quoted table\n" + newest);
-        check(newest.contains("ORDER BY h.top DESC NULLS LAST, f.begin_snapshot DESC, f.data_file_id DESC LIMIT 1"),
+        check(newest.contains("ORDER BY tops.top DESC NULLS LAST, f.begin_snapshot DESC, f.data_file_id DESC LIMIT 1"),
             "newest sql: the file with the highest height, else the last committed\n" + newest);
-        check(newest.contains("lower(hc.column_name) IN ('height', 'blockheight')"),
+        check(newest.contains("lower(c.column_name) IN ('height', 'blockheight')"),
             "newest sql: height columns decide\n" + newest);
-        check(newest.contains("CASE WHEN hs.max_value ~ '^-?[0-9]+$' THEN hs.max_value::numeric END"),
+        check(newest.contains("CASE WHEN st.max_value ~ '^-?[0-9]+$' THEN st.max_value::numeric END"),
             "newest sql: only numeric statistics are cast\n" + newest);
         check(newest.contains("pc.transform = 'identity'"), "newest sql: identity partitions\n" + newest);
+        check(!newest.contains("LATERAL") && newest.contains("GROUP BY st.data_file_id"), "newest sql: no per-file subquery\n" + newest);
 
         String wrapped = CatalogStats.viaPostgres("lake", "SELECT 'a'");
         check(wrapped.equals("SELECT * FROM postgres_query('__ducklake_metadata_lake', 'SELECT ''a''')"),
