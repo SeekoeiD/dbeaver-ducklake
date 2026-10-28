@@ -449,6 +449,19 @@ public final class QueryGuardEstimate {
     }
 
     /**
+     * What a plain scan reads once the "Newest file only" condition is added: the scan as if it
+     * had the filter {@code column BETWEEN min AND max}, over the files that the catalog's min/max
+     * statistics leave for that bound ({@code CatalogStats.prunedFiles}).
+     */
+    public static ScanEstimate newestFileEstimate(QueryGuardPlan.Scan scan, Candidate table,
+                                                  NewestFileFilter.Choice choice, TableFiles pruned) {
+        String filter = choice.column() + ">=" + choice.min() + " AND " + choice.column() + "<=" + choice.max();
+        QueryGuardPlan.Scan bounded = new QueryGuardPlan.Scan(scan.table(), scan.projections(), true, null, List.of(),
+            false, false, filter);
+        return estimate(bounded, table, pruned, null);
+    }
+
+    /**
      * Count each table's footers once. A {@code SELECT * ... LIMIT n} plan has two limited scans of
      * the same table (late materialization: a row-id scan under the LIMIT and a wide scan that
      * fetches the chosen rows), and DuckDB reads each footer once for both: the measurement above
@@ -705,6 +718,16 @@ public final class QueryGuardEstimate {
 
     /** The body of the confirmation dialog. */
     public static String dialogMessage(List<ScanEstimate> estimates, long thresholdBytes) {
+        return dialogMessage(estimates, thresholdBytes, null);
+    }
+
+    /**
+     * The body of the confirmation dialog, with the "Newest file only" choice's own line after the
+     * scans when the statement has one.
+     *
+     * @param newestFileLine {@link #newestFileLine}, or null
+     */
+    public static String dialogMessage(List<ScanEstimate> estimates, long thresholdBytes, String newestFileLine) {
         StringBuilder sb = new StringBuilder();
         long total = total(estimates);
         boolean anyUpper = false;
@@ -721,6 +744,10 @@ public final class QueryGuardEstimate {
 
         sb.append('\n');
 
+        if (newestFileLine != null) {
+            sb.append(newestFileLine).append("\n\n");
+        }
+
         if (anyLimited) {
             sb.append("The LIMIT estimate assumes the LIMIT stops the scan early: DuckDB still opens every file"
                 + " of the table for its footer, one request each, then reads only the first rows.\n");
@@ -733,6 +760,18 @@ public final class QueryGuardEstimate {
         sb.append("DuckDB's in-process cache may already hold some of this data. Catalog round trips"
             + " and inlined rows are not counted.");
         return sb.toString();
+    }
+
+    /**
+     * The dialog's line for the "Newest file only" choice, e.g.
+     * {@code Newest file only: height BETWEEN 3203188 AND 3203190 (1 file, ~4.2 MB)}.
+     *
+     * @param where    the added condition without the table qualifier
+     * @param estimate the scan sized for that condition by the catalog's min/max statistics
+     */
+    public static String newestFileLine(String where, ScanEstimate estimate) {
+        return "Newest file only: " + where + " (" + estimate.files() + (estimate.files() == 1 ? " file" : " files")
+            + ", ~" + formatBytes(estimate.bytes()) + ")";
     }
 
     /** One scan's line in the dialog, after the table name. */

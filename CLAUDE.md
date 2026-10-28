@@ -103,6 +103,13 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
   the connection settings (or a companion plugin's presets), not in the code. The viewer replaces its filter on the first read, so the WHERE is set
   again on the viewer's live filter via reflection (`getDataFilter()`); without that method no
   default is applied. Checked against DBeaver 26.2.3 bytecode only.
+- The guard's dialog offers "Newest file only" for a plain one-table SELECT (`guard/NewestFileQuery`
+  checks the text, `QueryGuardPlan.plainScan` the plan; both must pass). The choice comes back in
+  `QueryGuard.Token.rewrittenSql`, and `GuardedStatement.executeStatement` swaps it in with
+  `setQueryString` before `super.executeStatement()`: `JDBCStatementImpl.executeStatement` passes
+  its `query` field to `execute(String)`, which hands it to the driver (26.2.3 bytecode). The
+  editor's text is untouched. The WHERE goes after the table name or alias, never at the end, so a
+  trailing `--` comment cannot swallow it.
 - Connection settings are DBeaver provider properties with keys in `DuckLakeConstants`. The same
   keys are declared in the model bundle's `plugin.xml` and read by the UI page. Add a setting in all
   three places.

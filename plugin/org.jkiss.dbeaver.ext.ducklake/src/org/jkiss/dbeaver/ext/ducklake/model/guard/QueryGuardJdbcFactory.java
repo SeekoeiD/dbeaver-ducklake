@@ -66,6 +66,13 @@ public class QueryGuardJdbcFactory extends JDBCFactoryDefault {
                 token = null;
             }
 
+            // "Newest file only": JDBCStatementImpl.executeStatement passes its query field to
+            // execute(String), which hands it to the driver, so swapping the field swaps the SQL.
+            // The SQL editor keeps its own copy of the statement text, which stays as typed.
+            if (token != null && token.rewrittenSql() != null) {
+                setQueryString(token.rewrittenSql());
+            }
+
             return super.executeStatement();
         }
 

@@ -112,6 +112,48 @@ public final class QueryGuardPlan {
         return scans;
     }
 
+    /**
+     * The plan's one table scan when the plan is a plain read of one table: a chain of nothing but
+     * projections from the root down to a single scan, which is neither filtered nor limited. Null
+     * for anything else (aggregate, sort, join, window, DISTINCT, LIMIT, filter, two scans). The
+     * query guard offers "Newest file only" for such a plan, where adding a WHERE on the scanned
+     * table changes how much is read and nothing else.
+     */
+    public static Scan plainScan(String json) {
+        JsonElement node = JsonParser.parseString(json);
+
+        if (node.isJsonArray()) {
+            JsonArray roots = node.getAsJsonArray();
+
+            if (roots.size() != 1) {
+                return null;
+            }
+
+            node = roots.get(0);
+        }
+
+        while (node != null && node.isJsonObject()) {
+            JsonObject object = node.getAsJsonObject();
+            String name = string(object.has("name") ? object.get("name") : object.get("operator_name"));
+            JsonElement children = object.get("children");
+            int childCount = children != null && children.isJsonArray() ? children.getAsJsonArray().size() : 0;
+
+            if (isScan(name)) {
+                List<Scan> scans = new ArrayList<>();
+                walk(node, false, scans);
+                return childCount == 0 && scans.size() == 1 && !scans.get(0).filtered() ? scans.get(0) : null;
+            }
+
+            if (!normalize(name).equals("PROJECTION") || childCount != 1) {
+                return null;
+            }
+
+            node = children.getAsJsonArray().get(0);
+        }
+
+        return null;
+    }
+
     private static void walk(JsonElement element, boolean underLimit, List<Scan> scans) {
         if (element == null || !element.isJsonObject()) {
             return;

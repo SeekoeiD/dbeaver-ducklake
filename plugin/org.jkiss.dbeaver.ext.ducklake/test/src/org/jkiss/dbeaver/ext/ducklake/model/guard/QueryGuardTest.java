@@ -25,6 +25,8 @@ import java.util.Map;
  * may pick for the plugin's JDBC driver). {@code *analyze-filtered.txt} is a filtered scan that
  * still reads all 6 files ("Total Files Read: 6", "Inlined Tables Read: 1") and whose file list
  * DuckDB cut short with "...", {@code *analyze-groupby.txt} an unfiltered GROUP BY.
+ * {@code *blocks-plain.json} is {@code SELECT * FROM lake.main.blocks} on a local-file DuckLake
+ * (DuckDB 1.5.4 and 2.0.0 JDBC): a bare scan with nothing above it.
  */
 public final class QueryGuardTest {
 
@@ -83,6 +85,10 @@ public final class QueryGuardTest {
         filterOnlyColumns();
         guardableStatements();
         formatting();
+        newestFileText();
+        newestFileRewrite();
+        newestFilePlanEligibility();
+        newestFileDialog();
 
         System.out.println("OK, " + passed + " checks passed");
     }
@@ -663,6 +669,122 @@ public final class QueryGuardTest {
                 .equals("Query guard: read 46 MB from object storage (114 requests) in 0.19 s"),
             QueryGuardEstimate.measurementMessage(114, 47_710_208L, 0.188));
         check(QueryGuardEstimate.measurementMessage(0, 0, 0.01).contains("nothing read"), "measurement: cached");
+    }
+
+    // ------------------------------------------------------------------ newest file only
+
+    private static void newestFileText() {
+        NewestFileQuery.Parsed bare = NewestFileQuery.parse("select * from arc.bronze.raw_responses");
+        check(bare != null && bare.nameParts().equals(List.of("arc", "bronze", "raw_responses")) && bare.alias() == null,
+            "newest text: bare three-part name " + bare);
+
+        NewestFileQuery.Parsed quoted = NewestFileQuery.parse("SELECT a, b FROM \"x\".\"y\".\"z\" AS t;");
+        check(quoted != null && quoted.nameParts().equals(List.of("x", "y", "z")) && "t".equals(quoted.alias()),
+            "newest text: quoted parts with AS alias " + quoted);
+
+        NewestFileQuery.Parsed commented = NewestFileQuery.parse("select * from t -- note");
+        check(commented != null && commented.nameParts().equals(List.of("t")) && commented.alias() == null,
+            "newest text: trailing comment " + commented);
+
+        check(NewestFileQuery.parse("-- why\nSELECT\n  height,\n  hash\nFROM lake . main . blocks b\n;\n") != null,
+            "newest text: leading comment, line breaks, spaced dots, alias without AS");
+        check(NewestFileQuery.parse("select * from \"my schema\".\"a.b\"") != null, "newest text: quoted dot and space");
+
+        for (String sql : List.of(
+            "select * from t where height > 5",
+            "select * from t limit 10",
+            "select * from t order by height",
+            "select asset, count(*) from t group by asset",
+            "select asset from t group by asset",
+            "select * from t join u using (id)",
+            "select * from t, u",
+            "select * from t union all select * from u",
+            "select * from t; select * from u",
+            "with x as (select * from t) select * from x",
+            "select count(*) from t",
+            "select * from (select * from t)",
+            "select * from read_parquet('x.parquet')",
+            "select 'a' from t",
+            "select * from t /* note */",
+            "select * from t where",
+            "select * from t limit",
+            "select * from t as",
+            "from t select *",
+            "select * from t tablesample 10",
+            "select *")) {
+            check(NewestFileQuery.parse(sql) == null, "newest text: rejects " + sql);
+        }
+    }
+
+    private static void newestFileRewrite() {
+        NewestFileFilter.Choice choice = new NewestFileFilter.Choice("height", BigInteger.valueOf(3_203_188),
+            BigInteger.valueOf(3_203_190));
+        java.util.function.UnaryOperator<String> quote = name -> name.matches("[a-z_][a-z0-9_]*") ? name : "\"" + name + "\"";
+
+        String bare = "select * from arc.bronze.raw_responses";
+        check(NewestFileQuery.rewrite(bare, NewestFileQuery.parse(bare), choice, quote)
+                .equals("select * from arc.bronze.raw_responses WHERE raw_responses.height BETWEEN 3203188 AND 3203190"),
+            "newest rewrite: no alias " + NewestFileQuery.rewrite(bare, NewestFileQuery.parse(bare), choice, quote));
+
+        String aliased = "SELECT a, b FROM \"x\".\"y\".\"Z\" AS t;";
+        check(NewestFileQuery.rewrite(aliased, NewestFileQuery.parse(aliased), choice, quote)
+                .equals("SELECT a, b FROM \"x\".\"y\".\"Z\" AS t WHERE t.height BETWEEN 3203188 AND 3203190;"),
+            "newest rewrite: alias, semicolon " + NewestFileQuery.rewrite(aliased, NewestFileQuery.parse(aliased), choice, quote));
+
+        String quotedTable = "select * from lake.main.\"Blocks\" ;";
+        check(NewestFileQuery.rewrite(quotedTable, NewestFileQuery.parse(quotedTable), choice, quote)
+                .equals("select * from lake.main.\"Blocks\" WHERE \"Blocks\".height BETWEEN 3203188 AND 3203190 ;"),
+            "newest rewrite: quoted table reference "
+                + NewestFileQuery.rewrite(quotedTable, NewestFileQuery.parse(quotedTable), choice, quote));
+
+        String commented = "select * from t -- note";
+        check(NewestFileQuery.rewrite(commented, NewestFileQuery.parse(commented), choice, quote)
+                .equals("select * from t WHERE t.height BETWEEN 3203188 AND 3203190 -- note"),
+            "newest rewrite: WHERE goes before the comment");
+    }
+
+    private static void newestFilePlanEligibility() throws IOException {
+        for (String name : List.of("blocks-plain.json", "v2-blocks-plain.json")) {
+            QueryGuardPlan.Scan scan = QueryGuardPlan.plainScan(read(name));
+            check(scan != null && scan.projections().size() == 4, "newest plan: plain scan is eligible, " + name);
+        }
+
+        check(QueryGuardPlan.plainScan(read("blocks-default-filter.json")) == null, "newest plan: filtered");
+        check(QueryGuardPlan.plainScan(read("v2-blocks-default-filter.json")) == null, "newest plan: v2 filtered");
+        check(QueryGuardPlan.plainScan(read("blocks-limit.json")) == null, "newest plan: limited");
+        check(QueryGuardPlan.plainScan(read("v2-blocks-limit.json")) == null, "newest plan: v2 limited");
+        check(QueryGuardPlan.plainScan(read("filtered-limit.json")) == null, "newest plan: filtered and limited");
+        check(QueryGuardPlan.plainScan(read("blocks-limit-distinct.json")) == null, "newest plan: DISTINCT");
+        check(QueryGuardPlan.plainScan(read("v2-blocks-limit-distinct.json")) == null, "newest plan: v2 DISTINCT");
+        check(QueryGuardPlan.plainScan(read("blocks-limit-window.json")) == null, "newest plan: window");
+        check(QueryGuardPlan.plainScan(read("v2-blocks-limit-window.json")) == null, "newest plan: v2 window");
+        check(QueryGuardPlan.plainScan(read("groupby.json")) == null, "newest plan: aggregate");
+        check(QueryGuardPlan.plainScan(read("join.json")) == null, "newest plan: join");
+        check(QueryGuardPlan.plainScan(read("topn.json")) == null, "newest plan: ORDER BY LIMIT");
+        check(QueryGuardPlan.plainScan(read("count.json")) == null, "newest plan: no scan");
+    }
+
+    private static void newestFileDialog() throws IOException {
+        QueryGuardPlan.Scan scan = QueryGuardPlan.plainScan(read("blocks-plain.json"));
+        QueryGuardEstimate.Candidate blocks = new QueryGuardEstimate.Candidate("lake", "main", "blocks", 4,
+            List.of("height", "height_bucket", "hash", "payload"));
+        NewestFileFilter.Choice choice = new NewestFileFilter.Choice("height", BigInteger.valueOf(3_203_188),
+            BigInteger.valueOf(3_203_190));
+        QueryGuardEstimate.ScanEstimate estimate = QueryGuardEstimate.newestFileEstimate(scan, blocks, choice,
+            new QueryGuardEstimate.TableFiles(1, 4L * 1024 * 1024, 0, null));
+        check(estimate.files() == 1 && estimate.bytes() == 4L * 1024 * 1024, "newest dialog: one file, all columns " + estimate);
+
+        String line = QueryGuardEstimate.newestFileLine("height BETWEEN 3203188 AND 3203190", estimate);
+        check(line.equals("Newest file only: height BETWEEN 3203188 AND 3203190 (1 file, ~4.0 MB)"), "newest dialog: " + line);
+
+        String message = QueryGuardEstimate.dialogMessage(List.of(
+            new QueryGuardEstimate.ScanEstimate("arc.bronze.raw_responses", 8674, 29L * 1024 * 1024 * 1024, 4, 4, false,
+                false)), 100L * 1024 * 1024, line);
+        check(message.contains("arc.bronze.raw_responses: 8674 files, ~29 GB") && message.contains(line),
+            "newest dialog: message\n" + message);
+        check(!QueryGuardEstimate.dialogMessage(List.of(
+                new QueryGuardEstimate.ScanEstimate("t", 1, 1, 1, 1, false, false)), 0).contains("Newest file only"),
+            "newest dialog: no line without the offer");
     }
 
     // ------------------------------------------------------------------ helpers

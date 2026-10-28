@@ -11,6 +11,7 @@ import org.jkiss.dbeaver.ext.ducklake.model.DuckLakeCatalogDiscovery;
 import org.jkiss.dbeaver.ext.ducklake.model.DuckLakeConstants;
 import org.jkiss.dbeaver.ext.ducklake.model.DuckLakeDataSource;
 import org.jkiss.dbeaver.model.DBPDataSourceContainer;
+import org.jkiss.dbeaver.model.DBUtils;
 import org.jkiss.dbeaver.model.connection.DBPConnectionConfiguration;
 import org.jkiss.dbeaver.model.exec.DBCException;
 import org.jkiss.dbeaver.model.exec.DBCExecutionContext;
@@ -36,6 +37,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 /**
  * The query guard. DuckLake keeps its data on object storage and runs the query in the user's own
@@ -124,9 +126,36 @@ public final class QueryGuard {
      * @param measure      whether the HTTP log should be read after the statement
      * @param connectionId DuckDB's id of the connection, which the log records per entry
      * @param sinceMicros  DuckDB's clock (epoch microseconds) just before the statement
+     * @param rewrittenSql the statement to run instead of the user's, when the user chose "Newest
+     *                     file only" in the dialog; null to run the user's statement
      */
     public record Token(Connection connection, DBCExecutionContext context, long startNanos, boolean measure,
-                        long connectionId, long sinceMicros) {
+                        long connectionId, long sinceMicros, @Nullable String rewrittenSql) {
+    }
+
+    /**
+     * What the pre-flight found.
+     *
+     * @param estimates  one per DuckLake scan; empty when the plan reads no DuckLake table
+     * @param plainScan  the plan's scan when the plan is a plain read of one table
+     *                   ({@link QueryGuardPlan#plainScan}), else null
+     * @param candidate  the catalog table that scan reads, when it is the only scan and resolved to
+     *                   one table, else null
+     * @param deadline   the pre-flight's deadline (epoch milliseconds), which the "Newest file only"
+     *                   lookups share
+     */
+    record Preflight(List<QueryGuardEstimate.ScanEstimate> estimates, @Nullable QueryGuardPlan.Scan plainScan,
+                     @Nullable QueryGuardEstimate.Candidate candidate, long deadline) {
+    }
+
+    /**
+     * The "Newest file only" choice of the dialog.
+     *
+     * @param sql      the user's statement with the newest file's range added as a WHERE
+     * @param where    that range without the table qualifier, for the dialog
+     * @param estimate what the statement reads with it
+     */
+    record NewestFileOffer(String sql, String where, QueryGuardEstimate.ScanEstimate estimate) {
     }
 
     // ------------------------------------------------------------------ settings
@@ -204,12 +233,14 @@ public final class QueryGuard {
         }
 
         long threshold = thresholdBytes(cfg);
+        Preflight preflight = null;
         List<QueryGuardEstimate.ScanEstimate> estimates = null;
         Function<String, String> metadataSchemas = session.getDataSource() instanceof DuckLakeDataSource lake
             ? lake::getMetadataSchema : catalog -> null;
 
         try {
-            estimates = preflight(connection, sql, metadataSchemas);
+            preflight = preflight(connection, sql, metadataSchemas);
+            estimates = preflight.estimates();
         } catch (GuardTimeout e) {
             addMessage(context, "Query guard: planning took longer than " + (BUDGET_MS / 1000) + " s, estimate skipped");
         } catch (Exception e) {
@@ -222,23 +253,31 @@ public final class QueryGuard {
             addMessage(context, "Query guard: no DuckLake table scan in the plan, nothing to estimate");
         }
 
+        String rewrittenSql = null;
+
         if (estimates != null && !estimates.isEmpty()) {
             long total = QueryGuardEstimate.total(estimates);
             log.debug("Query guard estimate " + QueryGuardEstimate.formatBytes(total) + " for " + estimates);
             addMessage(context, QueryGuardEstimate.estimateMessage(estimates));
 
             if (total > threshold) {
-                confirm(container, estimates, threshold);
+                NewestFileOffer offer = newestFileOffer(session, connection, sql, preflight, metadataSchemas);
+
+                if (confirm(container, estimates, threshold, offer)) {
+                    rewrittenSql = offer.sql();
+                    log.info("Query guard: ran on the newest file: " + rewrittenSql);
+                    addMessage(context, "Query guard: ran on the newest file: " + rewrittenSql);
+                }
             }
         }
 
         long[] mark = startMeasurement(connection);
 
         if (mark == null) {
-            return new Token(connection, context, System.nanoTime(), false, 0, 0);
+            return new Token(connection, context, System.nanoTime(), false, 0, 0, rewrittenSql);
         }
 
-        Token token = new Token(connection, context, System.nanoTime(), true, mark[0], mark[1]);
+        Token token = new Token(connection, context, System.nanoTime(), true, mark[0], mark[1], rewrittenSql);
 
         synchronized (IN_FLIGHT) {
             IN_FLIGHT.add(token);
@@ -271,7 +310,7 @@ public final class QueryGuard {
      *                        (a catalog attached by hand); without it a filtered scan is not
      *                        pruned by the catalog's statistics
      */
-    static List<QueryGuardEstimate.ScanEstimate> preflight(
+    static Preflight preflight(
         Connection connection,
         String sql,
         Function<String, String> metadataSchemas
@@ -284,8 +323,11 @@ public final class QueryGuard {
         List<QueryGuardPlan.Scan> scans = QueryGuardPlan.parseJson(plan.toString());
 
         if (scans.isEmpty()) {
-            return Collections.emptyList();
+            return new Preflight(Collections.emptyList(), null, null, deadline);
         }
+
+        QueryGuardPlan.Scan plainScan = scans.size() == 1 ? QueryGuardPlan.plainScan(plan.toString()) : null;
+        QueryGuardEstimate.Candidate plainTable = null;
 
         String[] current = new String[2];
         query(connection, "SELECT current_database(), current_schema()", deadline, rs -> {
@@ -321,6 +363,10 @@ public final class QueryGuard {
             QueryGuardEstimate.Candidate chosen = QueryGuardEstimate.choose(found, sql, current[0], current[1]);
             QueryGuardEstimate.ScanEstimate best = null;
 
+            if (plainScan != null) {
+                plainTable = chosen;
+            }
+
             for (QueryGuardEstimate.Candidate candidate : chosen != null ? List.of(chosen) : found) {
                 boolean needNames = !scan.fileNames().isEmpty();
                 String key = candidate.qualifiedName() + (needNames ? "#names" : "");
@@ -343,7 +389,70 @@ public final class QueryGuard {
             estimates.add(best);
         }
 
-        return QueryGuardEstimate.countFootersOnce(estimates);
+        return new Preflight(QueryGuardEstimate.countFootersOnce(estimates), plainScan, plainTable, deadline);
+    }
+
+    /**
+     * The "Newest file only" choice for a plain read of one table, or null when the statement is
+     * not one (by its plan and by its text, {@link NewestFileQuery}), the table has no newest file
+     * with a usable integer column, or the lookups fail or run past the pre-flight's deadline. The
+     * newest file is found as the data editor finds it ({@code DuckLakeTable.defaultWhere}): the
+     * connection's preferred columns, {@link CatalogStats#newestFile}, {@link NewestFileFilter#choose}.
+     * The cost shown with it comes from the same min/max pruning the guard applies to a filtered
+     * scan, for the range it adds.
+     */
+    @Nullable
+    private static NewestFileOffer newestFileOffer(
+        JDBCSession session,
+        Connection connection,
+        String sql,
+        @Nullable Preflight preflight,
+        Function<String, String> metadataSchemas
+    ) {
+        if (preflight == null || preflight.plainScan() == null || preflight.candidate() == null
+            || preflight.estimates().size() != 1) {
+            return null;
+        }
+
+        NewestFileQuery.Parsed parsed = NewestFileQuery.parse(sql);
+        QueryGuardEstimate.Candidate table = preflight.candidate();
+
+        // The statement must name the table the plan scans; a view over it would not take the WHERE.
+        if (parsed == null || QueryGuardEstimate.matching(List.of(table), parsed.nameParts()).isEmpty()) {
+            return null;
+        }
+
+        String metadataSchema = metadataSchemas.apply(table.catalog());
+
+        if (metadataSchema == null) {
+            return null;
+        }
+
+        try {
+            List<String> preferred = NewestFileFilter.parseColumns(session.getDataSource().getContainer()
+                .getConnectionConfiguration().getProviderProperty(DuckLakeConstants.PROP_NEWEST_FILE_COLUMNS));
+            List<CatalogStats.ColumnStats> columns = CatalogStats.newestFile(connection, table.catalog(), metadataSchema,
+                table.schema(), table.table(), preferred, preflight.deadline());
+            NewestFileFilter.Choice choice = NewestFileFilter.choose(columns, preferred);
+
+            if (choice == null) {
+                return null;
+            }
+
+            Map<String, QueryGuardEstimate.Range> bounds = Map.of(choice.column().toLowerCase(Locale.ROOT),
+                new QueryGuardEstimate.Range(choice.min(), choice.max()));
+            CatalogStats.Pruned pruned = CatalogStats.prunedFiles(connection, table.catalog(), metadataSchema,
+                table.schema(), table.table(), bounds, preflight.deadline());
+            QueryGuardEstimate.ScanEstimate estimate = QueryGuardEstimate.newestFileEstimate(preflight.plainScan(), table,
+                choice, new QueryGuardEstimate.TableFiles(pruned.files(), pruned.dataBytes(), pruned.deleteBytes(), null));
+            UnaryOperator<String> quote = name -> DBUtils.getQuotedIdentifier(session.getDataSource(), name);
+            return new NewestFileOffer(NewestFileQuery.rewrite(sql, parsed, choice, quote),
+                NewestFileFilter.where(choice, quote), estimate);
+        } catch (Exception e) {
+            log.debug("Query guard: no newest-file choice for " + table.qualifiedName() + ": "
+                + DuckLakeCatalogDiscovery.redact(String.valueOf(e.getMessage())));
+            return null;
+        }
     }
 
     /**
@@ -438,29 +547,39 @@ public final class QueryGuard {
         return new QueryGuardEstimate.TableFiles(totals[0], totals[1], totals[2], null, totals[3], totals[4]);
     }
 
-    /** Ask the user. Returns normally for Run, throws for Cancel. */
-    private static void confirm(
+    /**
+     * Ask the user. Returns false for Run, true for "Newest file only" (offered only when
+     * {@code offer} is not null), throws for Cancel.
+     */
+    private static boolean confirm(
         DBPDataSourceContainer container,
         List<QueryGuardEstimate.ScanEstimate> estimates,
-        long threshold
+        long threshold,
+        @Nullable NewestFileOffer offer
     ) throws DBCException {
         long total = QueryGuardEstimate.total(estimates);
 
         if (DBWorkbench.getPlatform().getApplication().isHeadlessMode()) {
             log.warn("Query guard: running a query estimated at " + QueryGuardEstimate.formatBytes(total) + " (no UI to ask)");
-            return;
+            return false;
         }
 
+        List<String> buttons = offer == null ? List.of("Run", "Cancel") : List.of("Run", "Newest file only", "Cancel");
+        String newestFileLine = offer == null ? null : QueryGuardEstimate.newestFileLine(offer.where(), offer.estimate());
         DBPPlatformUI.UserChoiceResponse response = DBWorkbench.getPlatformUI().showUserChoice(
             "DuckLake query guard",
-            QueryGuardEstimate.dialogMessage(estimates, threshold),
-            List.of("Run", "Cancel"),
+            QueryGuardEstimate.dialogMessage(estimates, threshold, newestFileLine),
+            buttons,
             List.of("Don't ask again for this connection"),
             null,
-            1);
+            buttons.size() - 1);
 
         if (response != null && response.forAllChoiceIndex != null) {
             disable(container);
+        }
+
+        if (response != null && offer != null && response.choiceIndex == 1) {
+            return true;
         }
 
         if (response == null || response.choiceIndex != 0) {
@@ -468,6 +587,8 @@ public final class QueryGuard {
                 + QueryGuardEstimate.formatBytes(total) + " from object storage. Raise \"Warn above (MB)\" or"
                 + " turn the guard off on the connection's DuckLake storage tab.");
         }
+
+        return false;
     }
 
     /** "Don't ask again": switch the guard off for this connection and save that. */
