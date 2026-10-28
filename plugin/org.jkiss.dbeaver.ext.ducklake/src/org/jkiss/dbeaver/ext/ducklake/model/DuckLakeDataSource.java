@@ -67,6 +67,13 @@ public class DuckLakeDataSource extends DuckDBDataSource {
      */
     private volatile Map<String, String> catalogSources;
 
+    /**
+     * Catalog name to its Postgres metadata schema, set by discovery. The query guard and the
+     * tables' default data filter read file statistics from {@code __ducklake_metadata_<catalog>}
+     * through it. Null until discovery has run.
+     */
+    private volatile Map<String, String> metadataSchemas;
+
     /** The catalog {@code USE} selects, chosen by discovery. Null until discovery has run. */
     private volatile String activeCatalog;
 
@@ -138,6 +145,26 @@ public class DuckLakeDataSource extends DuckDBDataSource {
     public String getCatalogSource(@NotNull String catalogName) {
         Map<String, String> sources = catalogSources;
         return sources == null ? null : sources.get(catalogName);
+    }
+
+    /**
+     * The Postgres schema a discovered catalog's metadata lives in, or null for a catalog discovery
+     * did not attach. Catalog names compare case-insensitively, like DuckDB's.
+     */
+    public String getMetadataSchema(@NotNull String catalogName) {
+        Map<String, String> schemas = metadataSchemas;
+
+        if (schemas == null) {
+            return null;
+        }
+
+        for (Map.Entry<String, String> e : schemas.entrySet()) {
+            if (e.getKey().equalsIgnoreCase(catalogName)) {
+                return e.getValue();
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -283,6 +310,7 @@ public class DuckLakeDataSource extends DuckDBDataSource {
 
         discoveredAttachments = Collections.unmodifiableMap(new LinkedHashMap<>(result.attachStatements()));
         catalogSources = Collections.unmodifiableMap(new LinkedHashMap<>(result.sources()));
+        metadataSchemas = Collections.unmodifiableMap(new LinkedHashMap<>(result.metadataSchemas()));
         activeCatalog = result.activeCatalog();
 
         log.info("DuckLake active catalog '" + result.activeCatalog() + "', " + result.attached()

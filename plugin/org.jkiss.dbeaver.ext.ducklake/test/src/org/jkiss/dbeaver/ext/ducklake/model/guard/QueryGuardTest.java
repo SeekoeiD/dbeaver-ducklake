@@ -5,6 +5,7 @@
 package org.jkiss.dbeaver.ext.ducklake.model.guard;
 
 import java.io.IOException;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -72,6 +73,11 @@ public final class QueryGuardTest {
         estimateFilesReadWithoutNames();
         estimateLimitedScan();
         estimateDeleteFiles();
+        limitPlanShapes();
+        estimateLimitFootersAndFirstFile();
+        filterBoundsFromPlans();
+        estimatePrunedByStatistics();
+        catalogStatsSql();
         chooseCandidate();
         loggingOwnership();
         filterOnlyColumns();
@@ -308,6 +314,174 @@ public final class QueryGuardTest {
         check(e.limited() && e.bytes() == 0, "limited: nothing counted");
     }
 
+    /**
+     * Which scans a LIMIT stops early, on plans captured from the demo stack's 40-file
+     * {@code lake.main.blocks} (seed.py) with DuckDB 1.5.4 and 2.0.0: only those with nothing but
+     * projections (or the late-materialization join) between them and the LIMIT. DISTINCT and a
+     * window function above the scan need every row, so the LIMIT does not stop it.
+     */
+    private static void limitPlanShapes() throws IOException {
+        for (String prefix : List.of("", "v2-")) {
+            List<QueryGuardPlan.Scan> star = QueryGuardPlan.parseJson(read(prefix + "blocks-limit.json"));
+            check(star.size() == 2 && star.get(0).limited() && star.get(1).limited(),
+                prefix + "blocks limit: both late-materialization scans stop early");
+            check(star.get(0).projections().size() == 4 && star.get(1).projections().isEmpty(),
+                prefix + "blocks limit: the wide scan projects 4 columns, the row-id scan none");
+
+            List<QueryGuardPlan.Scan> column = QueryGuardPlan.parseJson(read(prefix + "blocks-limit-column.json"));
+            check(!column.isEmpty() && column.stream().allMatch(QueryGuardPlan.Scan::limited),
+                prefix + "blocks limit one column: stops early");
+
+            List<QueryGuardPlan.Scan> distinct = QueryGuardPlan.parseJson(read(prefix + "blocks-limit-distinct.json"));
+            check(distinct.size() == 1 && !distinct.get(0).limited(), prefix + "blocks limit: DISTINCT above the scan reads it all");
+
+            List<QueryGuardPlan.Scan> window = QueryGuardPlan.parseJson(read(prefix + "blocks-limit-window.json"));
+            check(window.size() == 1 && !window.get(0).limited(), prefix + "blocks limit: a window above the scan reads it all");
+
+            List<QueryGuardPlan.Scan> filter = QueryGuardPlan.parseJson(read(prefix + "blocks-default-filter.json"));
+            check(filter.size() == 1 && filter.get(0).filtered() && !filter.get(0).limited()
+                    && filter.get(0).filterText().contains("height"),
+                prefix + "blocks default filter: a filtered full scan " + filter);
+        }
+
+        // ORDER BY, GROUP BY and joins were already covered: topn.json, groupby.json, join.json.
+        check(QueryGuardPlan.parseJson(read("groupby.json")).stream().noneMatch(QueryGuardPlan.Scan::limited),
+            "group by: never limited");
+        check(QueryGuardPlan.parseJson(read("join.json")).stream().noneMatch(QueryGuardPlan.Scan::limited),
+            "join: never limited");
+    }
+
+    /**
+     * SELECT * FROM blocks LIMIT 200 against what it measured on the demo stack: 41 GETs, 2,602,340
+     * bytes, i.e. the 40 footers (843 bytes each plus the 8-byte trailer) and one whole 2.5 MB file.
+     */
+    private static void estimateLimitFootersAndFirstFile() throws IOException {
+        QueryGuardEstimate.Candidate blocks = new QueryGuardEstimate.Candidate("lake", "main", "blocks", 4,
+            List.of("height_bucket", "height", "hash", "payload"));
+        QueryGuardEstimate.TableFiles files = new QueryGuardEstimate.TableFiles(40, 102_663_361L, 0, null,
+            40 * (843 + QueryGuardEstimate.FOOTER_TRAILER), 2_584_934L);
+        List<QueryGuardEstimate.ScanEstimate> estimates = new ArrayList<>();
+
+        for (QueryGuardPlan.Scan scan : QueryGuardPlan.parseJson(read("blocks-limit.json"))) {
+            estimates.add(QueryGuardEstimate.estimate(scan, blocks, files));
+        }
+
+        check(QueryGuardEstimate.total(estimates) == 2 * 34_040 + 2_584_934L,
+            "limit: before dedupe both scans count the footers, got " + QueryGuardEstimate.total(estimates));
+        estimates = QueryGuardEstimate.countFootersOnce(estimates);
+        long total = QueryGuardEstimate.total(estimates);
+        check(total == 34_040 + 2_584_934L, "limit: footers once plus the largest file, got " + total);
+        check(Math.abs(total - 2_602_340L) / 2_602_340.0 < 0.02, "limit: within 2% of the measured 2,602,340 bytes");
+        check(estimates.get(0).limited() && estimates.get(0).files() == 40, "limit: all 40 files are opened");
+
+        String dialog = QueryGuardEstimate.dialogMessage(estimates, 1);
+        check(dialog.contains("lake.main.blocks: 40 files, ~2.5 MB, stops early (LIMIT): every file's footer plus the first rows"),
+            "limit: dialog line\n" + dialog);
+        check(dialog.contains("assumes the LIMIT stops the scan early"), "limit: dialog says what it assumed\n" + dialog);
+        String output = QueryGuardEstimate.estimateMessage(estimates);
+        check(output.equals("Query guard: estimated 2.5 MB (lake.main.blocks: LIMIT assumed to stop the scan early,"
+            + " footers of 40 files plus the first rows)"), "limit: output line " + output);
+
+        // The 2.0 plan has the same shape and so the same estimate.
+        List<QueryGuardEstimate.ScanEstimate> v2 = new ArrayList<>();
+
+        for (QueryGuardPlan.Scan scan : QueryGuardPlan.parseJson(read("v2-blocks-limit.json"))) {
+            v2.add(QueryGuardEstimate.estimate(scan, blocks, files));
+        }
+
+        check(QueryGuardEstimate.total(QueryGuardEstimate.countFootersOnce(v2)) == total, "limit: v2 same estimate");
+
+        // A scan that projects nothing and is alone in the plan still pays for the footers.
+        QueryGuardPlan.Scan rowIds = new QueryGuardPlan.Scan("blocks", List.of(), false, null, List.of(), false, true);
+        QueryGuardEstimate.ScanEstimate alone = QueryGuardEstimate.estimate(rowIds, blocks, files);
+        check(alone.bytes() == 34_040, "limit: a projection-less scan reads only footers, got " + alone.bytes());
+    }
+
+    private static void filterBoundsFromPlans() throws IOException {
+        Map<String, QueryGuardEstimate.Range> v15 = QueryGuardEstimate.filterBounds(
+            QueryGuardPlan.parseJson(read("blocks-default-filter.json")).get(0).filterText());
+        check(v15.equals(Map.of("height", range(975_000, 999_999))), "bounds: 1.5 BETWEEN " + v15);
+
+        // DuckDB 2.0 prints only the lower bound for the same BETWEEN.
+        Map<String, QueryGuardEstimate.Range> v2 = QueryGuardEstimate.filterBounds(
+            QueryGuardPlan.parseJson(read("v2-blocks-default-filter.json")).get(0).filterText());
+        check(v2.equals(Map.of("height", new QueryGuardEstimate.Range(BigInteger.valueOf(975_000), null))), "bounds: 2.0 " + v2);
+
+        check(QueryGuardEstimate.filterBounds("height=5").equals(Map.of("height", range(5, 5))), "bounds: equality");
+        check(QueryGuardEstimate.filterBounds("(blockheight > 5) AND (blockheight < 10)")
+            .equals(Map.of("blockheight", range(6, 9))), "bounds: strict ends");
+        check(QueryGuardEstimate.filterBounds("\"Height\">=-3").equals(Map.of("height", new QueryGuardEstimate.Range(
+            BigInteger.valueOf(-3), null))), "bounds: quoted, negative");
+        check(QueryGuardEstimate.filterBounds("height>=975000 AND (CAST(height AS DECIMAL(20,1)) < 980000.5)")
+                .equals(Map.of("height", new QueryGuardEstimate.Range(BigInteger.valueOf(975_000), null))),
+            "bounds: the cast conjunct is ignored");
+        check(QueryGuardEstimate.filterBounds("height=5 OR height=9").isEmpty(), "bounds: OR rules nothing out");
+        check(QueryGuardEstimate.filterBounds("contains(payload, 'height=5')").isEmpty(),
+            "bounds: a comparison inside a string literal is not a bound");
+        check(QueryGuardEstimate.filterBounds("height>=10 AND contains(payload, 'it''s height=5 OR 1')")
+            .equals(Map.of("height", new QueryGuardEstimate.Range(java.math.BigInteger.TEN, null))),
+            "bounds: a literal with a doubled quote and an OR inside it is blanked, the real bound stays");
+        check(QueryGuardEstimate.filterBounds("hash>'a' AND ts>='2026-01-03 00:00:00'::TIMESTAMP").isEmpty(),
+            "bounds: strings and timestamps are not integer bounds");
+        check(QueryGuardEstimate.filterBounds("t.height>5").isEmpty(), "bounds: a qualified name is not a scan column");
+        check(QueryGuardEstimate.filterBounds(null).isEmpty(), "bounds: no filter");
+    }
+
+    /** The data editor's default filter on blocks, as measured: 1 of 40 files, 2,566,863 bytes. */
+    private static void estimatePrunedByStatistics() throws IOException {
+        QueryGuardEstimate.Candidate blocks = new QueryGuardEstimate.Candidate("lake", "main", "blocks", 4,
+            List.of("height_bucket", "height", "hash", "payload"));
+        QueryGuardPlan.Scan scan = QueryGuardPlan.parseJson(read("blocks-default-filter.json")).get(0);
+        QueryGuardEstimate.TableFiles all = new QueryGuardEstimate.TableFiles(40, 102_663_361L, 0, null);
+        QueryGuardEstimate.TableFiles newest = new QueryGuardEstimate.TableFiles(1, 2_566_867L, 0, null);
+
+        QueryGuardEstimate.ScanEstimate e = QueryGuardEstimate.estimate(scan, blocks, all, newest);
+        check(e.files() == 1 && e.tableFiles() == 40 && e.pruned() && e.upperBound(), "pruned: 1 of 40 " + e);
+        check(e.bytes() == 2_566_867L, "pruned: the newest file, got " + e.bytes());
+        check(QueryGuardEstimate.scanLine(e).equals("1 of 40 files after the catalog's min/max statistics, up to 2.4 MB (4 of 4 columns)"),
+            "pruned: dialog line " + QueryGuardEstimate.scanLine(e));
+
+        QueryGuardEstimate.ScanEstimate unpruned = QueryGuardEstimate.estimate(scan, blocks, all, null);
+        check(unpruned.files() == 40 && !unpruned.pruned() && unpruned.bytes() == 102_663_361L,
+            "pruned: without statistics the whole table, as before");
+    }
+
+    private static void catalogStatsSql() {
+        Map<String, QueryGuardEstimate.Range> bounds = new LinkedHashMap<>();
+        bounds.put("height", range(975_000, 999_999));
+        bounds.put("height_bucket", new QueryGuardEstimate.Range(null, BigInteger.ZERO));
+        String sql = CatalogStats.prunedFilesSql("bronze", "main", "raw_responses", bounds);
+
+        check(sql.startsWith("SELECT count(*) AS files,"), "pruned sql: distinct column names for postgres_query\n" + sql);
+        check(sql.contains("FROM \"bronze\".ducklake_data_file f"), "pruned sql: metadata schema quoted\n" + sql);
+        check(sql.contains("lower(t.table_name) = lower('raw_responses')"), "pruned sql: table\n" + sql);
+        check(sql.contains("THEN st.max_value::numeric < 975000 OR st.min_value::numeric > 999999 ELSE false END"),
+            "pruned sql: height range\n" + sql);
+        check(sql.contains("THEN st.min_value::numeric > 0 ELSE false END"), "pruned sql: open lower end\n" + sql);
+        check(sql.contains("c.column_type IN ('int8', 'int16', 'int32', 'int64'"), "pruned sql: integer columns only\n" + sql);
+        check(sql.contains("AND c.parent_column IS NULL AND c.column_type IN"), "pruned sql: top-level columns only\n" + sql);
+        check(sql.contains("f.end_snapshot IS NULL") && sql.contains("d.end_snapshot IS NULL"), "pruned sql: live files only");
+
+        String newest = CatalogStats.newestFileSql("my\"meta", "main", "o'brien");
+        check(newest.contains("FROM \"my\"\"meta\".ducklake_table t"), "newest sql: quoted schema\n" + newest);
+        check(newest.contains("lower('o''brien')"), "newest sql: quoted table\n" + newest);
+        check(newest.contains("ORDER BY h.top DESC NULLS LAST, f.begin_snapshot DESC, f.data_file_id DESC LIMIT 1"),
+            "newest sql: the file with the highest height, else the last committed\n" + newest);
+        check(newest.contains("lower(hc.column_name) IN ('height', 'blockheight')"),
+            "newest sql: height columns decide\n" + newest);
+        check(newest.contains("CASE WHEN hs.max_value ~ '^-?[0-9]+$' THEN hs.max_value::numeric END"),
+            "newest sql: only numeric statistics are cast\n" + newest);
+        check(newest.contains("pc.transform = 'identity'"), "newest sql: identity partitions\n" + newest);
+
+        String wrapped = CatalogStats.viaPostgres("lake", "SELECT 'a'");
+        check(wrapped.equals("SELECT * FROM postgres_query('__ducklake_metadata_lake', 'SELECT ''a''')"),
+            "postgres_query wrapper " + wrapped);
+    }
+
+    private static QueryGuardEstimate.Range range(long low, long high) {
+        return new QueryGuardEstimate.Range(BigInteger.valueOf(low), BigInteger.valueOf(high));
+    }
+
     private static void estimateDeleteFiles() {
         QueryGuardPlan.Scan scan = new QueryGuardPlan.Scan("transfers", List.of("id"), false, null, List.of(), false, false);
         QueryGuardEstimate.ScanEstimate e = QueryGuardEstimate.estimate(scan, TRANSFERS,
@@ -439,7 +613,7 @@ public final class QueryGuardTest {
             new QueryGuardEstimate.ScanEstimate("lake.main.small", 0, 0, 2, 2, false, true)), 100L * 1024 * 1024);
         check(message.contains("about 200 MB") && message.contains("threshold 100 MB"), "dialog: totals\n" + message);
         check(message.contains("lake.main.transfers: 6 files, up to 200 MB (2 of 6 columns)"), "dialog: scan line\n" + message);
-        check(message.contains("lake.main.small: stops early (LIMIT)"), "dialog: limited line\n" + message);
+        check(message.contains("lake.main.small: 0 files, stops early (LIMIT)"), "dialog: limited line\n" + message);
         check(message.contains("cache"), "dialog: cache note");
 
         check(QueryGuardEstimate.measurementMessage(114, 47_710_208L, 0.188)

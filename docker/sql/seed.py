@@ -51,6 +51,36 @@ except Exception:
 for stmt in statements:
     con.execute(stmt)
 
+# lake.main.blocks: a chain-shaped table with many small files, for the plugin's query guard and
+# its "newest file" default filter. Every INSERT writes one Parquet file, so BLOCK_FILES inserts of
+# BLOCK_ROWS rows each, in height order, give BLOCK_FILES files whose height ranges do not overlap,
+# the same layout as the production bronze tables (partitioned by height_bucket, sorted by height).
+# The payload is two md5 strings per row so the files are about 2 MB and do not compress away.
+# CREATE OR REPLACE keeps the seed idempotent; the old files stay on S3 as orphans, which only a
+# DuckLake cleanup would remove and nothing here reads.
+BLOCK_FILES = 40
+BLOCK_ROWS = 25_000
+
+con.execute("""
+    CREATE OR REPLACE TABLE lake.main.blocks (
+        height_bucket BIGINT,
+        height        BIGINT,
+        hash          VARCHAR,
+        payload       VARCHAR
+    )
+""")
+con.execute("ALTER TABLE lake.main.blocks SET PARTITIONED BY (height_bucket)")
+
+for i in range(BLOCK_FILES):
+    start = i * BLOCK_ROWS
+    con.execute(f"""
+        INSERT INTO lake.main.blocks
+        SELECT h // 1000000, h, md5(h::VARCHAR), md5((h * 7)::VARCHAR) || md5((h * 13)::VARCHAR)
+        FROM range({start}, {start + BLOCK_ROWS}) t(h)
+    """)
+
+TABLES.append("lake.main.blocks")
+
 print("--- SEED OK ---")
 
 for table in TABLES:

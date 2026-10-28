@@ -9,6 +9,7 @@ import org.jkiss.code.Nullable;
 import org.jkiss.dbeaver.Log;
 import org.jkiss.dbeaver.ext.ducklake.model.DuckLakeCatalogDiscovery;
 import org.jkiss.dbeaver.ext.ducklake.model.DuckLakeConstants;
+import org.jkiss.dbeaver.ext.ducklake.model.DuckLakeDataSource;
 import org.jkiss.dbeaver.model.DBPDataSourceContainer;
 import org.jkiss.dbeaver.model.connection.DBPConnectionConfiguration;
 import org.jkiss.dbeaver.model.exec.DBCException;
@@ -34,6 +35,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * The query guard. DuckLake keeps its data on object storage and runs the query in the user's own
@@ -203,9 +205,11 @@ public final class QueryGuard {
 
         long threshold = thresholdBytes(cfg);
         List<QueryGuardEstimate.ScanEstimate> estimates = null;
+        Function<String, String> metadataSchemas = session.getDataSource() instanceof DuckLakeDataSource lake
+            ? lake::getMetadataSchema : catalog -> null;
 
         try {
-            estimates = preflight(connection, sql);
+            estimates = preflight(connection, sql, metadataSchemas);
         } catch (GuardTimeout e) {
             addMessage(context, "Query guard: planning took longer than " + (BUDGET_MS / 1000) + " s, estimate skipped");
         } catch (Exception e) {
@@ -221,6 +225,7 @@ public final class QueryGuard {
         if (estimates != null && !estimates.isEmpty()) {
             long total = QueryGuardEstimate.total(estimates);
             log.debug("Query guard estimate " + QueryGuardEstimate.formatBytes(total) + " for " + estimates);
+            addMessage(context, QueryGuardEstimate.estimateMessage(estimates));
 
             if (total > threshold) {
                 confirm(container, estimates, threshold);
@@ -259,8 +264,18 @@ public final class QueryGuard {
         }
     }
 
-    /** EXPLAIN the statement and size its DuckLake scans. Empty when the plan reads no DuckLake table. */
-    static List<QueryGuardEstimate.ScanEstimate> preflight(Connection connection, String sql) throws SQLException {
+    /**
+     * EXPLAIN the statement and size its DuckLake scans. Empty when the plan reads no DuckLake table.
+     *
+     * @param metadataSchemas catalog name to its Postgres metadata schema, or null when unknown
+     *                        (a catalog attached by hand); without it a filtered scan is not
+     *                        pruned by the catalog's statistics
+     */
+    static List<QueryGuardEstimate.ScanEstimate> preflight(
+        Connection connection,
+        String sql,
+        Function<String, String> metadataSchemas
+    ) throws SQLException {
         long deadline = System.currentTimeMillis() + BUDGET_MS;
         StringBuilder plan = new StringBuilder();
 
@@ -316,7 +331,9 @@ public final class QueryGuard {
                     files.put(key, tableFiles);
                 }
 
-                QueryGuardEstimate.ScanEstimate estimate = QueryGuardEstimate.estimate(scan, candidate, tableFiles);
+                QueryGuardEstimate.TableFiles pruned = pruneByStatistics(connection, scan, candidate,
+                    metadataSchemas.apply(candidate.catalog()), deadline);
+                QueryGuardEstimate.ScanEstimate estimate = QueryGuardEstimate.estimate(scan, candidate, tableFiles, pruned);
 
                 if (best == null || estimate.bytes() > best.bytes()) {
                     best = estimate;
@@ -326,7 +343,37 @@ public final class QueryGuard {
             estimates.add(best);
         }
 
-        return estimates;
+        return QueryGuardEstimate.countFootersOnce(estimates);
+    }
+
+    /**
+     * The files a filtered scan can still touch once DuckLake has compared its integer bounds with
+     * each file's min/max statistics, or null when the filter has no such bound or the metadata
+     * schema is unknown. Without this, the data editor's default filter on a table's newest file
+     * ({@code height BETWEEN a AND b}, see {@code DuckLakeTable}) was estimated as the whole table:
+     * 220 GB for {@code litecoin.bronze.raw_responses}, against one file actually read.
+     */
+    @Nullable
+    private static QueryGuardEstimate.TableFiles pruneByStatistics(
+        Connection connection,
+        QueryGuardPlan.Scan scan,
+        QueryGuardEstimate.Candidate table,
+        @Nullable String metadataSchema,
+        long deadline
+    ) throws SQLException {
+        if (!scan.filtered() || scan.limited() || metadataSchema == null) {
+            return null;
+        }
+
+        Map<String, QueryGuardEstimate.Range> bounds = QueryGuardEstimate.filterBounds(scan.filterText());
+
+        if (bounds.isEmpty()) {
+            return null;
+        }
+
+        CatalogStats.Pruned pruned = CatalogStats.prunedFiles(connection, table.catalog(), metadataSchema,
+            table.schema(), table.table(), bounds, deadline);
+        return new QueryGuardEstimate.TableFiles(pruned.files(), pruned.dataBytes(), pruned.deleteBytes(), null);
     }
 
     private static List<QueryGuardEstimate.Candidate> findTables(Connection connection, String table, long deadline)
@@ -353,32 +400,42 @@ public final class QueryGuard {
         String source = "ducklake_list_files(" + literal(table.catalog()) + ", " + literal(table.table())
             + ", schema => " + literal(table.schema()) + ")";
 
+        // A footer read is the footer plus its 8-byte trailer; files without a recorded footer size
+        // count nothing for it.
+        String footer = "CASE WHEN data_file_footer_size IS NULL THEN 0 ELSE data_file_footer_size + "
+            + QueryGuardEstimate.FOOTER_TRAILER + " END";
+
         if (withNames) {
             Map<String, Long> sizes = new LinkedHashMap<>();
-            long[] deletes = new long[1];
-            query(connection, "SELECT data_file, data_file_size_bytes, coalesce(delete_file_size_bytes, 0) FROM " + source,
+            long[] extra = new long[2];
+            query(connection, "SELECT data_file, data_file_size_bytes, coalesce(delete_file_size_bytes, 0), " + footer
+                    + " FROM " + source,
                 deadline, rs -> {
                     sizes.put(rs.getString(1), rs.getLong(2));
-                    deletes[0] += rs.getLong(3);
+                    extra[0] += rs.getLong(3);
+                    extra[1] += rs.getLong(4);
                 });
             long total = 0;
+            long largest = 0;
 
             for (long size : sizes.values()) {
                 total += size;
+                largest = Math.max(largest, size);
             }
 
-            return new QueryGuardEstimate.TableFiles(sizes.size(), total, deletes[0], sizes);
+            return new QueryGuardEstimate.TableFiles(sizes.size(), total, extra[0], sizes, extra[1], largest);
         }
 
-        long[] totals = new long[3];
+        long[] totals = new long[5];
         query(connection,
-            "SELECT count(*), coalesce(sum(data_file_size_bytes), 0), coalesce(sum(delete_file_size_bytes), 0) FROM " + source,
+            "SELECT count(*), coalesce(sum(data_file_size_bytes), 0), coalesce(sum(delete_file_size_bytes), 0),"
+                + " coalesce(sum(" + footer + "), 0), coalesce(max(data_file_size_bytes), 0) FROM " + source,
             deadline, rs -> {
-                totals[0] = rs.getLong(1);
-                totals[1] = rs.getLong(2);
-                totals[2] = rs.getLong(3);
+                for (int i = 0; i < totals.length; i++) {
+                    totals[i] = rs.getLong(i + 1);
+                }
             });
-        return new QueryGuardEstimate.TableFiles(totals[0], totals[1], totals[2], null);
+        return new QueryGuardEstimate.TableFiles(totals[0], totals[1], totals[2], null, totals[3], totals[4]);
     }
 
     /** Ask the user. Returns normally for Run, throws for Cancel. */
@@ -563,7 +620,7 @@ public final class QueryGuard {
 
     // ------------------------------------------------------------------ JDBC helpers
 
-    private interface RowHandler {
+    interface RowHandler {
         void row(ResultSet rs) throws SQLException;
     }
 
@@ -574,8 +631,8 @@ public final class QueryGuard {
         }
     }
 
-    /** Run one query, cancelling it when the pre-flight deadline passes. */
-    private static void query(Connection connection, String sql, long deadline, RowHandler handler) throws SQLException {
+    /** Run one query, cancelling it when the deadline (epoch milliseconds) passes. */
+    static void query(Connection connection, String sql, long deadline, RowHandler handler) throws SQLException {
         long remaining = deadline - System.currentTimeMillis();
 
         if (remaining <= 0) {

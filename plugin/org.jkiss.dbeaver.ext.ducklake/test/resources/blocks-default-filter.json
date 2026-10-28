@@ -1,0 +1,31 @@
+[
+    {
+        "name": "PROJECTION",
+        "children": [
+            {
+                "name": "DUCKLAKE_SCAN",
+                "children": [],
+                "extra_info": {
+                    "Table": "blocks",
+                    "Projections": [
+                        "height",
+                        "height_bucket",
+                        "hash",
+                        "payload"
+                    ],
+                    "Filters": "height>=975000 AND height<=999999",
+                    "Estimated Cardinality": "200000"
+                }
+            }
+        ],
+        "extra_info": {
+            "Projections": [
+                "height_bucket",
+                "height",
+                "hash",
+                "payload"
+            ],
+            "Estimated Cardinality": "200000"
+        }
+    }
+]

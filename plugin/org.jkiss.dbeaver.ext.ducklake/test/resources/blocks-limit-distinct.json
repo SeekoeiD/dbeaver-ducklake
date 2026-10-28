@@ -1,0 +1,36 @@
+[
+    {
+        "name": "STREAMING_LIMIT",
+        "children": [
+            {
+                "name": "HASH_GROUP_BY",
+                "children": [
+                    {
+                        "name": "PROJECTION",
+                        "children": [
+                            {
+                                "name": "DUCKLAKE_SCAN",
+                                "children": [],
+                                "extra_info": {
+                                    "Table": "blocks",
+                                    "Projections": "hash",
+                                    "Estimated Cardinality": "1000000"
+                                }
+                            }
+                        ],
+                        "extra_info": {
+                            "Projections": "hash",
+                            "Estimated Cardinality": "1000000"
+                        }
+                    }
+                ],
+                "extra_info": {
+                    "Groups": "#0",
+                    "Aggregates": "",
+                    "Estimated Cardinality": "1000000"
+                }
+            }
+        ],
+        "extra_info": {}
+    }
+]

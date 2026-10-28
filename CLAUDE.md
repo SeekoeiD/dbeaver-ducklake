@@ -81,6 +81,17 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
   `getAdapter(DBCServerOutputReader)` prints the measurements in the Output panel. DuckDB 1.5 plans
   print bare table names, 2.0 plans qualified ones, and installs that resolved the driver under
   plugin 1.3.1 or older may still run a 2.0 jar, so keep both working.
+- The guard reads file statistics from DuckLake's metadata tables (`guard/CatalogStats`): one
+  `postgres_query` against `__ducklake_metadata_<catalog>`, in the metadata schema discovery
+  recorded (`DuckLakeDataSource.getMetadataSchema`). It prunes filtered scans with integer bounds,
+  and counts a LIMIT-stopped scan as every file's footer plus the largest file (measured: DuckDB
+  1.5.4 opens every footer at 1, 4 and 32 threads alike).
+- Tables are `DuckLakeTable` (`DuckLakeMetaModel.createTableOrViewImpl`). Its `readData` gives the
+  data editor's first read of a table a WHERE on the newest data file's height range
+  (`guard/NewestFileFilter`), because DuckDB JDBC ignores `setMaxRows` and double-click would
+  download the whole table. The viewer replaces its filter on the first read, so the WHERE is set
+  again on the viewer's live filter via reflection (`getDataFilter()`); without that method no
+  default is applied. Checked against DBeaver 26.2.3 bytecode only.
 - Connection settings are DBeaver provider properties with keys in `DuckLakeConstants`. The same
   keys are declared in the model bundle's `plugin.xml` and read by the UI page. Add a setting in all
   three places.

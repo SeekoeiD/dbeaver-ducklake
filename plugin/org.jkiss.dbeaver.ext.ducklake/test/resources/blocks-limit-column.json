@@ -1,0 +1,85 @@
+[
+    {
+        "name": "PROJECTION",
+        "children": [
+            {
+                "name": "PROJECTION",
+                "children": [
+                    {
+                        "name": "ORDER_BY",
+                        "children": [
+                            {
+                                "name": "PROJECTION",
+                                "children": [
+                                    {
+                                        "name": "HASH_JOIN",
+                                        "children": [
+                                            {
+                                                "name": "DUCKLAKE_SCAN",
+                                                "children": [],
+                                                "extra_info": {
+                                                    "Table": "blocks",
+                                                    "Projections": "height",
+                                                    "Estimated Cardinality": "1000000"
+                                                }
+                                            },
+                                            {
+                                                "name": "STREAMING_LIMIT",
+                                                "children": [
+                                                    {
+                                                        "name": "DUCKLAKE_SCAN",
+                                                        "children": [],
+                                                        "extra_info": {
+                                                            "Table": "blocks",
+                                                            "Projections": "",
+                                                            "Estimated Cardinality": "1000000"
+                                                        }
+                                                    }
+                                                ],
+                                                "extra_info": {}
+                                            }
+                                        ],
+                                        "extra_info": {
+                                            "Join Type": "SEMI",
+                                            "Conditions": [
+                                                "filename = filename",
+                                                "file_row_number = file_row_number"
+                                            ],
+                                            "Estimated Cardinality": "0"
+                                        }
+                                    }
+                                ],
+                                "extra_info": {
+                                    "Projections": [
+                                        "__internal_compress_integral_uinteger(#0, 0)",
+                                        "#1",
+                                        "#2"
+                                    ],
+                                    "Estimated Cardinality": "0"
+                                }
+                            }
+                        ],
+                        "extra_info": {
+                            "Order By": [
+                                "filename ASC",
+                                "file_row_number ASC"
+                            ]
+                        }
+                    }
+                ],
+                "extra_info": {
+                    "Projections": [
+                        "__internal_decompress_integral_bigint(#0, 0)",
+                        "#1",
+                        "#2"
+                    ],
+                    "Estimated Cardinality": "0"
+                }
+            }
+        ],
+        "extra_info": {
+            "Projections": "height",
+            "Estimated Cardinality": "0"
+        }
+    }
+]
