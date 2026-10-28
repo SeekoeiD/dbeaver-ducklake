@@ -93,6 +93,11 @@ public final class DuckLakeCatalogDiscovery {
      * @param warnings         catalogs or databases that were skipped, and why
      * @param sources          catalog name to where it lives, {@code <database>.<schema>} on the
      *                         Postgres server, for the description of each catalog node
+     * @param metadataSchemas  catalog name to its Postgres metadata schema alone. DuckLake attaches
+     *                         the metadata database as {@code __ducklake_metadata_<catalog>} and
+     *                         its tables sit in this schema there; the query guard and the
+     *                         default data filter read file statistics from them. Kept apart from
+     *                         {@code sources} because a database name may contain a dot.
      */
     public record Result(
         Map<String, String> attachStatements,
@@ -100,7 +105,8 @@ public final class DuckLakeCatalogDiscovery {
         int attached,
         int skipped,
         List<String> warnings,
-        Map<String, String> sources
+        Map<String, String> sources,
+        Map<String, String> metadataSchemas
     ) {
     }
 
@@ -307,6 +313,7 @@ public final class DuckLakeCatalogDiscovery {
     ) {
         Map<String, String> attachStatements = new LinkedHashMap<>();
         Map<String, String> sources = new LinkedHashMap<>();
+        Map<String, String> metadataSchemas = new LinkedHashMap<>();
         Set<String> taken = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         taken.addAll(RESERVED_NAMES);
 
@@ -342,6 +349,7 @@ public final class DuckLakeCatalogDiscovery {
             taken.add(name);
             attachStatements.put(name, attachSql);
             sources.put(name, candidate.database() + "." + candidate.schema());
+            metadataSchemas.put(name, candidate.schema());
             attached++;
 
             if (active == null) {
@@ -350,7 +358,7 @@ public final class DuckLakeCatalogDiscovery {
             }
         }
 
-        return new Result(attachStatements, active, attached, skipped, warnings, sources);
+        return new Result(attachStatements, active, attached, skipped, warnings, sources, metadataSchemas);
     }
 
     /**

@@ -1,0 +1,105 @@
+[
+    {
+        "name": "PROJECTION",
+        "children": [
+            {
+                "name": "PROJECTION",
+                "children": [
+                    {
+                        "name": "ORDER_BY",
+                        "children": [
+                            {
+                                "name": "PROJECTION",
+                                "children": [
+                                    {
+                                        "name": "HASH_JOIN",
+                                        "children": [
+                                            {
+                                                "name": "DUCKLAKE_SCAN",
+                                                "children": [],
+                                                "extra_info": {
+                                                    "Table": "lake.main.blocks",
+                                                    "Projections": [
+                                                        "height_bucket",
+                                                        "height",
+                                                        "hash",
+                                                        "payload"
+                                                    ],
+                                                    "Estimated Cardinality": "1000000"
+                                                }
+                                            },
+                                            {
+                                                "name": "STREAMING_LIMIT",
+                                                "children": [
+                                                    {
+                                                        "name": "DUCKLAKE_SCAN",
+                                                        "children": [],
+                                                        "extra_info": {
+                                                            "Table": "lake.main.blocks",
+                                                            "Projections": "",
+                                                            "Estimated Cardinality": "1000000"
+                                                        }
+                                                    }
+                                                ],
+                                                "extra_info": {
+                                                    "Limit": "200",
+                                                    "Estimated Cardinality": "200"
+                                                }
+                                            }
+                                        ],
+                                        "extra_info": {
+                                            "Join Type": "SEMI",
+                                            "Conditions": [
+                                                "filename = filename",
+                                                "file_row_number = file_row_number"
+                                            ],
+                                            "Estimated Cardinality": "1000000"
+                                        }
+                                    }
+                                ],
+                                "extra_info": {
+                                    "Projections": [
+                                        "CAST(#0 AS TINYINT)",
+                                        "CAST(#1 AS INTEGER)",
+                                        "#2",
+                                        "#3",
+                                        "#4",
+                                        "#5"
+                                    ],
+                                    "Estimated Cardinality": "1000000"
+                                }
+                            }
+                        ],
+                        "extra_info": {
+                            "Order By": [
+                                "filename ASC",
+                                "file_row_number ASC"
+                            ],
+                            "Estimated Cardinality": "1000000"
+                        }
+                    }
+                ],
+                "extra_info": {
+                    "Projections": [
+                        "CAST(#0 AS BIGINT)",
+                        "CAST(#1 AS BIGINT)",
+                        "#2",
+                        "#3",
+                        "#4",
+                        "#5"
+                    ],
+                    "Estimated Cardinality": "1000000"
+                }
+            }
+        ],
+        "extra_info": {
+            "Projections": [
+                "height_bucket",
+                "height",
+                "hash",
+                "payload"
+            ],
+            "Estimated Cardinality": "1000000"
+        }
+    }
+]

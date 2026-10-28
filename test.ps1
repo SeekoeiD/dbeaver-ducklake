@@ -4,8 +4,8 @@
 
 .DESCRIPTION
   Compiles the model bundle plus plugin\org.jkiss.dbeaver.ext.ducklake\test against the jars of a
-  DBeaver install (like build.ps1) and runs the query guard tests. No JUnit, no Maven: the test
-  class is a plain main() that exits non-zero on the first failed check.
+  DBeaver install (like build.ps1) and runs the query guard and default data filter tests. No
+  JUnit, no Maven: each test class is a plain main() that exits non-zero on the first failed check.
 
 .PARAMETER DBeaverPath
   DBeaver install dir (contains plugins/). Default: %LOCALAPPDATA%\DBeaver.
@@ -34,4 +34,7 @@ $sources = @(Get-ChildItem "$model\src", "$model\test\src" -Recurse -Filter *.ja
 if ($LASTEXITCODE -ne 0) { throw "test compile failed" }
 
 & $java -cp "$out;$cp" org.jkiss.dbeaver.ext.ducklake.model.guard.QueryGuardTest "$model\test\resources"
+if ($LASTEXITCODE -ne 0) { throw "tests failed" }
+
+& $java -cp "$out;$cp" org.jkiss.dbeaver.ext.ducklake.model.guard.NewestFileFilterTest
 if ($LASTEXITCODE -ne 0) { throw "tests failed" }

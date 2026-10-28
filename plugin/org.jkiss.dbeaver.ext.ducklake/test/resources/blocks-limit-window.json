@@ -1,0 +1,53 @@
+[
+    {
+        "name": "PROJECTION",
+        "children": [
+            {
+                "name": "STREAMING_LIMIT",
+                "children": [
+                    {
+                        "name": "PROJECTION",
+                        "children": [
+                            {
+                                "name": "WINDOW",
+                                "children": [
+                                    {
+                                        "name": "DUCKLAKE_SCAN",
+                                        "children": [],
+                                        "extra_info": {
+                                            "Table": "blocks",
+                                            "Projections": [
+                                                "height",
+                                                "height_bucket"
+                                            ],
+                                            "Estimated Cardinality": "1000000"
+                                        }
+                                    }
+                                ],
+                                "extra_info": {
+                                    "Projections": "ROW_NUMBER() OVER (PARTITION BY height_bucket)"
+                                }
+                            }
+                        ],
+                        "extra_info": {
+                            "Projections": [
+                                "#0",
+                                "#1",
+                                "#2"
+                            ],
+                            "Estimated Cardinality": "1000000"
+                        }
+                    }
+                ],
+                "extra_info": {}
+            }
+        ],
+        "extra_info": {
+            "Projections": [
+                "height",
+                "n"
+            ],
+            "Estimated Cardinality": "0"
+        }
+    }
+]

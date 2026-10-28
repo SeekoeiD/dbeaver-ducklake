@@ -4,11 +4,14 @@
  */
 package org.jkiss.dbeaver.ext.ducklake.model.guard;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -20,6 +23,12 @@ import java.util.regex.Pattern;
  * delete files. Parquet columns differ in size, filters let DuckDB skip row groups, and an
  * in-process cache may already hold some of the data, so the number is a rough guide to the order of
  * magnitude and never a promise.
+ *
+ * <p>Two refinements use the catalog beyond the file list. A scan whose filter bounds an integer
+ * column ({@code height BETWEEN a AND b}, {@code id = n}) counts only the files whose
+ * min/max statistics overlap the bounds, which is the pruning DuckLake itself does before it opens
+ * a file. And a scan that a LIMIT stops early counts what such a scan was measured to read on
+ * DuckDB 1.5.4: the footer of every file plus the first rows of one file (see {@link #estimate}).
  *
  * <p>Pure Java, no DBeaver classes, so it can be unit tested without an OSGi runtime.
  */
@@ -57,23 +66,67 @@ public final class QueryGuardEstimate {
      * @param deleteBytes total size of the delete files that go with them
      * @param fileSizes   size per data file path, or null when not fetched (only needed when the
      *                    plan lists file names)
+     * @param footerBytes what reading every data file's Parquet footer costs: the catalog's
+     *                    {@code data_file_footer_size} plus the 8-byte trailer, per file. Zero for
+     *                    files the catalog has no footer size for.
+     * @param largestFile size of the largest data file
      */
-    public record TableFiles(long fileCount, long dataBytes, long deleteBytes, Map<String, Long> fileSizes) {
+    public record TableFiles(long fileCount, long dataBytes, long deleteBytes, Map<String, Long> fileSizes,
+                             long footerBytes, long largestFile) {
+
+        /** Without footer sizes; the largest file is taken to be the mean one. */
+        public TableFiles(long fileCount, long dataBytes, long deleteBytes, Map<String, Long> fileSizes) {
+            this(fileCount, dataBytes, deleteBytes, fileSizes, 0, fileCount > 0 ? (dataBytes + fileCount - 1) / fileCount : 0);
+        }
     }
+
+    /**
+     * Bytes of the Parquet trailer DuckDB fetches with each footer: the 4-byte footer length and
+     * the {@code PAR1} magic. Measured on the demo stack: the footer GETs were 851 bytes for an
+     * 843-byte {@code data_file_footer_size}.
+     */
+    static final long FOOTER_TRAILER = 8;
 
     /**
      * The estimate for one scan.
      *
-     * @param table      qualified table name
-     * @param files      files the scan is expected to open
-     * @param bytes      estimated bytes read from object storage
-     * @param projected  columns projected
-     * @param columns    columns in the table
-     * @param upperBound the scan has filters, so DuckDB may read less
-     * @param limited    a LIMIT stops the scan early; bytes is 0
+     * @param table       qualified table name
+     * @param files       files the scan is expected to open
+     * @param bytes       estimated bytes read from object storage
+     * @param projected   columns projected
+     * @param columns     columns in the table
+     * @param upperBound  the scan has filters, so DuckDB may read less
+     * @param limited     a LIMIT stops the scan early: bytes is every file's footer plus the first
+     *                    rows of one file
+     * @param footerBytes the part of {@code bytes} that is footers (limited scans only)
+     * @param tableFiles  data files in the whole table; more than {@code files} when the catalog's
+     *                    min/max statistics ruled files out
      */
     public record ScanEstimate(String table, long files, long bytes, int projected, int columns,
-                               boolean upperBound, boolean limited) {
+                               boolean upperBound, boolean limited, long footerBytes, long tableFiles) {
+
+        public ScanEstimate(String table, long files, long bytes, int projected, int columns,
+                            boolean upperBound, boolean limited) {
+            this(table, files, bytes, projected, columns, upperBound, limited, 0, files);
+        }
+
+        /** Files ruled out by the catalog's min/max statistics before the scan starts. */
+        public boolean pruned() {
+            return !limited && tableFiles > files;
+        }
+    }
+
+    /**
+     * Closed integer range a pushed-down filter puts on one column; a null end is open. Built from
+     * the plan's filter text by {@link #filterBounds}.
+     */
+    public record Range(BigInteger low, BigInteger high) {
+
+        Range intersect(Range other) {
+            BigInteger lo = low == null ? other.low : other.low == null ? low : low.max(other.low);
+            BigInteger hi = high == null ? other.high : other.high == null ? high : high.min(other.high);
+            return new Range(lo, hi);
+        }
     }
 
     private QueryGuardEstimate() {
@@ -302,11 +355,45 @@ public final class QueryGuardEstimate {
 
     /** Estimate what one scan reads, given what the catalog says about its table. */
     public static ScanEstimate estimate(QueryGuardPlan.Scan scan, Candidate table, TableFiles files) {
+        return estimate(scan, table, files, null);
+    }
+
+    /**
+     * Estimate what one scan reads.
+     *
+     * <p>A scan a LIMIT stops early ({@link QueryGuardPlan.Scan#limited()}: nothing but projections
+     * between it and the LIMIT, no filter) is counted as the footer of every file plus the projected
+     * columns of the largest file. Measured on the demo stack with DuckDB 1.5.4 (cold instance, the
+     * guard's HTTP log), {@code SELECT * FROM t LIMIT 200} read:
+     * <ul>
+     *     <li>40 files of 2.5 MB, one row group each: 41 GETs, 2,602,340 bytes, which is the 40
+     *     footers (34,040 bytes) plus all of one file;</li>
+     *     <li>300 files of 140 KB: 301 GETs, 295,270 bytes;</li>
+     *     <li>20 files of 14 MB, 12 row groups each: 21 GETs, 1,246,807 bytes, the 20 footers plus
+     *     one row group (1.1 MB). The largest file overstates that by about 12 times.</li>
+     * </ul>
+     * The same at 1, 4 and 32 threads, so the thread count plays no part: DuckDB opens every file of
+     * the table to read its footer and then reads only as many row groups as the LIMIT needs. On a
+     * table of thousands of files that is thousands of small requests, which is why the footers
+     * are counted and not dropped as small.
+     *
+     * @param pruned the files left after the catalog's min/max statistics ruled some out for the
+     *               scan's filter, or null when nothing was ruled out
+     */
+    public static ScanEstimate estimate(QueryGuardPlan.Scan scan, Candidate table, TableFiles files, TableFiles pruned) {
         int columns = Math.max(table.columnCount(), 1);
         int projected = Math.min(readColumns(scan, table), columns);
 
         if (scan.limited()) {
-            return new ScanEstimate(table.qualifiedName(), 0, 0, projected, columns, false, true);
+            long data = 0;
+
+            if (projected > 0 && files.fileCount() > 0) {
+                data = Math.round(files.largestFile() * (projected / (double) columns)
+                    + files.deleteBytes() / (double) files.fileCount());
+            }
+
+            return new ScanEstimate(table.qualifiedName(), files.fileCount(), files.footerBytes() + data, projected, columns,
+                false, true, files.footerBytes(), files.fileCount());
         }
 
         long fileCount = files.fileCount();
@@ -348,12 +435,188 @@ public final class QueryGuardEstimate {
             fileCount = scan.filesRead();
             dataBytes = dataBytes * share;
             deleteBytes = deleteBytes * share;
+        } else if (pruned != null && pruned.fileCount() < files.fileCount()) {
+            fileCount = pruned.fileCount();
+            dataBytes = pruned.dataBytes();
+            deleteBytes = pruned.deleteBytes();
         }
 
         double fraction = projected / (double) columns;
         long bytes = Math.round(dataBytes * fraction + deleteBytes);
 
-        return new ScanEstimate(table.qualifiedName(), fileCount, bytes, projected, columns, scan.filtered(), false);
+        return new ScanEstimate(table.qualifiedName(), fileCount, bytes, projected, columns, scan.filtered(), false,
+            0, files.fileCount());
+    }
+
+    /**
+     * Count each table's footers once. A {@code SELECT * ... LIMIT n} plan has two limited scans of
+     * the same table (late materialization: a row-id scan under the LIMIT and a wide scan that
+     * fetches the chosen rows), and DuckDB reads each footer once for both: the measurement above
+     * saw one footer GET per file. The first scan of a table keeps its footers, later ones drop them.
+     */
+    public static List<ScanEstimate> countFootersOnce(List<ScanEstimate> estimates) {
+        Set<String> seen = new java.util.HashSet<>();
+        List<ScanEstimate> result = new ArrayList<>();
+
+        for (ScanEstimate e : estimates) {
+            if (e.limited() && e.footerBytes() > 0 && !seen.add(e.table().toLowerCase(Locale.ROOT))) {
+                e = new ScanEstimate(e.table(), e.files(), e.bytes() - e.footerBytes(), e.projected(), e.columns(),
+                    e.upperBound(), true, 0, e.tableFiles());
+            }
+
+            result.add(e);
+        }
+
+        return result;
+    }
+
+    // ------------------------------------------------------------------ filter bounds
+
+    /**
+     * A whole conjunct that is {@code column op integer}, as DuckDB prints a pushed-down filter:
+     * {@code height>=975000} in 1.5, {@code (height >= 975000)} in 2.0 (the parentheses are taken
+     * off first), the column possibly quoted. Matched against the entire conjunct, never searched
+     * for inside one: {@code (height = 5) IS NOT DISTINCT FROM false} (what 1.5.4 pushes down for
+     * {@code WHERE (height = 5) IS FALSE}), a CASE or COALESCE around the comparison, a NOT, an OR,
+     * a cast on the column side or a decimal constant all leave the conjunct unmatched, and an
+     * unmatched conjunct is ignored, which only makes the bound looser. Reading a bound out of such
+     * a conjunct would rule files out that hold matching rows and hide a full read behind a small
+     * estimate (found by a local Codex review, two rounds).
+     */
+    private static final Pattern BOUND = Pattern.compile(
+        "\\s*\"?([A-Za-z_][A-Za-z0-9_]*)\"?\\s*(>=|<=|=|>|<)\\s*(-?[0-9]+)\\s*");
+
+    /**
+     * A single-quoted SQL string, doubled quotes included. Blanked out before parsing, so that
+     * {@code contains(payload, 'height=5')} holds no comparison and no AND or parenthesis inside a
+     * literal can split or unbalance a conjunct.
+     */
+    private static final Pattern STRING_LITERAL = Pattern.compile("'(?:[^']|'')*'");
+
+    /**
+     * The integer ranges a scan's filter text puts on its columns, keyed by lower-case column name.
+     * The text, with the parentheses around the whole of it taken off, is split into its top-level
+     * AND conjuncts, each of which must hold for every row, and each conjunct is unwrapped and split
+     * the same way ({@code ((a) AND (b))} is how 1.5.4 prints a wrapped conjunction). Only a conjunct
+     * that is nothing but one comparison ({@link #BOUND}) narrows its column. Empty when no conjunct
+     * is one.
+     */
+    public static Map<String, Range> filterBounds(String filterText) {
+        Map<String, Range> bounds = new LinkedHashMap<>();
+
+        if (filterText != null) {
+            collectBounds(STRING_LITERAL.matcher(filterText).replaceAll(" "), bounds);
+        }
+
+        return bounds;
+    }
+
+    private static void collectBounds(String text, Map<String, Range> bounds) {
+        String bare = unwrap(text);
+        List<String> parts = conjuncts(bare);
+
+        if (parts.size() > 1) {
+            for (String part : parts) {
+                collectBounds(part, bounds);
+            }
+
+            return;
+        }
+
+        Matcher m = BOUND.matcher(bare);
+
+        if (!m.matches()) {
+            return;
+        }
+
+        BigInteger value = new BigInteger(m.group(3));
+        Range range = switch (m.group(2)) {
+            case "=" -> new Range(value, value);
+            case ">=" -> new Range(value, null);
+            case ">" -> new Range(value.add(BigInteger.ONE), null);
+            case "<=" -> new Range(null, value);
+            default -> new Range(null, value.subtract(BigInteger.ONE));
+        };
+        bounds.merge(m.group(1).toLowerCase(Locale.ROOT), range, Range::intersect);
+    }
+
+    /**
+     * The text split at the ANDs outside every parenthesis; an AND inside parentheses stays put. A
+     * comma outside every parenthesis splits too: a plan that lists several pushed-down filters as a
+     * JSON array reaches here joined with ", " ({@code QueryGuardPlan.string}), each entry a required
+     * filter of its own, and no comparison has a bare comma (those sit inside IN (...) or a CAST).
+     */
+    static List<String> conjuncts(String text) {
+        List<String> parts = new ArrayList<>();
+        int depth = 0;
+        int start = 0;
+
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+            } else if (depth == 0 && c == ',') {
+                parts.add(text.substring(start, i));
+                start = i + 1;
+            } else if (depth == 0 && text.regionMatches(true, i, "AND", 0, 3)
+                && (i == 0 || !isWordChar(text.charAt(i - 1)))
+                && (i + 3 >= text.length() || !isWordChar(text.charAt(i + 3)))) {
+                parts.add(text.substring(start, i));
+                start = i + 3;
+                i += 2;
+            }
+        }
+
+        parts.add(text.substring(start));
+        return parts;
+    }
+
+    /** {@code ((x))} as {@code x}: parentheses that wrap the whole conjunct, however many. */
+    static String unwrap(String conjunct) {
+        String s = conjunct.trim();
+
+        while (s.length() >= 2 && s.charAt(0) == '(' && s.charAt(s.length() - 1) == ')' && closesAtEnd(s)) {
+            s = s.substring(1, s.length() - 1).trim();
+        }
+
+        return s;
+    }
+
+    /** Whether the opening parenthesis at index 0 is closed by the last character and not earlier. */
+    private static boolean closesAtEnd(String s) {
+        int depth = 0;
+
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+
+                if (depth == 0) {
+                    return i == s.length() - 1;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static boolean isWordChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '"';
+    }
+
+    /** A catalog statistic as an integer, or null when it is missing or not an integer. */
+    public static BigInteger integer(String value) {
+        if (value == null || !value.trim().matches("-?[0-9]+")) {
+            return null;
+        }
+
+        return new BigInteger(value.trim());
     }
 
     /**
@@ -445,25 +708,23 @@ public final class QueryGuardEstimate {
         StringBuilder sb = new StringBuilder();
         long total = total(estimates);
         boolean anyUpper = false;
+        boolean anyLimited = false;
 
         sb.append("This query will read about ").append(formatBytes(total))
             .append(" from object storage (warning threshold ").append(formatBytes(thresholdBytes)).append(").\n\n");
 
         for (ScanEstimate e : estimates) {
-            sb.append("  ").append(e.table()).append(": ");
-
-            if (e.limited()) {
-                sb.append("stops early (LIMIT)\n");
-                continue;
-            }
-
-            sb.append(e.files()).append(e.files() == 1 ? " file, " : " files, ")
-                .append(e.upperBound() ? "up to " : "~").append(formatBytes(e.bytes()))
-                .append(" (").append(e.projected()).append(" of ").append(e.columns()).append(" columns)\n");
+            sb.append("  ").append(e.table()).append(": ").append(scanLine(e)).append('\n');
             anyUpper |= e.upperBound();
+            anyLimited |= e.limited();
         }
 
         sb.append('\n');
+
+        if (anyLimited) {
+            sb.append("The LIMIT estimate assumes the LIMIT stops the scan early: DuckDB still opens every file"
+                + " of the table for its footer, one request each, then reads only the first rows.\n");
+        }
 
         if (anyUpper) {
             sb.append("Filters may let DuckDB skip files and row groups, so filtered scans read less.\n");
@@ -471,6 +732,51 @@ public final class QueryGuardEstimate {
 
         sb.append("DuckDB's in-process cache may already hold some of this data. Catalog round trips"
             + " and inlined rows are not counted.");
+        return sb.toString();
+    }
+
+    /** One scan's line in the dialog, after the table name. */
+    static String scanLine(ScanEstimate e) {
+        String columns = " (" + e.projected() + " of " + e.columns() + " columns)";
+
+        if (e.limited()) {
+            String files = e.files() + (e.files() == 1 ? " file" : " files");
+
+            if (e.footerBytes() == 0 && e.bytes() == 0) {
+                return files + ", stops early (LIMIT), counted with the other scan of this table";
+            }
+
+            return files + ", ~" + formatBytes(e.bytes()) + ", stops early (LIMIT): every file's footer"
+                + (e.projected() > 0 ? " plus the first rows" + columns : "");
+        }
+
+        String files = e.pruned()
+            ? e.files() + " of " + e.tableFiles() + " files after the catalog's min/max statistics, "
+            : e.files() + (e.files() == 1 ? " file, " : " files, ");
+        return files + (e.upperBound() ? "up to " : "~") + formatBytes(e.bytes()) + columns;
+    }
+
+    /**
+     * The Output panel line with the estimate, so it sits next to the measured line that follows
+     * the query and the two can be compared.
+     */
+    public static String estimateMessage(List<ScanEstimate> estimates) {
+        StringBuilder sb = new StringBuilder("Query guard: estimated ").append(formatBytes(total(estimates)));
+        List<String> notes = new ArrayList<>();
+
+        for (ScanEstimate e : estimates) {
+            if (e.limited() && e.footerBytes() > 0) {
+                notes.add(e.table() + ": LIMIT assumed to stop the scan early, footers of " + e.files()
+                    + (e.files() == 1 ? " file" : " files") + " plus the first rows");
+            } else if (e.pruned()) {
+                notes.add(e.table() + ": " + e.files() + " of " + e.tableFiles() + " files after min/max statistics");
+            }
+        }
+
+        if (!notes.isEmpty()) {
+            sb.append(" (").append(String.join("; ", notes)).append(')');
+        }
+
         return sb.toString();
     }
 

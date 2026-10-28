@@ -178,31 +178,70 @@ of the statement.
 
 Change it on the connection's **DuckLake storage** tab, under **Query guard**: untick the box to turn
 it off, or set **Warn above (MB)** (default 100). New connections and connections saved before 1.3.0
-start with the guard on.
+start with the guard on. The same group holds **Newest-file columns**, which decides which data file
+a table opens on (see [Opening a table shows its newest data](#opening-a-table-shows-its-newest-data));
+empty by default.
 
 What the estimate does not know:
 
 - **The cache.** DuckDB caches the files it reads in memory, so running a query a second time often
   reads nothing. The estimate assumes a cold start.
-- **Filters.** DuckLake skips files and row groups using min/max statistics once the scan starts, and
-  plain `EXPLAIN` can't show that. A filtered scan is shown as "up to" the full table, so a point
-  lookup on a big table still asks.
+- **Filters.** DuckLake skips files using the catalog's min/max statistics, and plain `EXPLAIN` can't
+  show that. For a filter that bounds an integer column (`height BETWEEN a AND b`, `id = n`)
+  the guard asks the catalog itself which files overlap the bounds and counts only those, so a
+  height lookup on a big table no longer asks. Other filters (strings, timestamps, `OR`) are shown
+  as "up to" the full table. Row groups skipped inside a file are not counted either way.
 - **Column widths.** The estimate uses the share of columns, not their sizes. Two narrow columns of
   an eight-column table count as a quarter of the table even if the other six hold the large text.
 - **Catalog traffic.** Round trips to the Postgres catalog and inlined rows stored there are not
   counted, in the estimate or in the measurement.
-- `LIMIT` without `ORDER BY` stops early and counts as zero. `ORDER BY ... LIMIT` reads the sort
-  column of the whole table and is counted that way.
+- `LIMIT` without `ORDER BY`, aggregate, join, window or `DISTINCT` above the scan stops early. It
+  still opens every file of the table to read its Parquet footer (one request per file, whatever the
+  thread count), then reads the first rows. The guard counts every footer plus the projected columns
+  of the largest file, and says so in the dialog and the Output panel. That matches the measurement
+  within 2% when a file is one row group; for files of many row groups it overstates (12 times for
+  14 MB files of 12 row groups). `ORDER BY ... LIMIT` reads the sort column of the whole table and
+  is counted that way.
 - Statements with bound parameters (`?`, `:name`) run through a prepared statement and are not
   checked.
 - Queries inside a transaction (manual-commit mode, or after a `BEGIN` you typed) are not checked.
   Any failed statement aborts an open DuckDB transaction, and the guard won't risk that for an
   estimate.
 
-The planning step usually takes 20 to 30 ms and the measurement about 15 ms. If planning and the
+The Output panel also gets the estimate before the query runs (`Query guard: estimated 2.5 MB ...`),
+so you can hold it against the measured line.
+
+The planning step usually takes 20 to 30 ms and the measurement about 15 ms. A filtered scan adds
+one catalog round trip for the statistics. If planning and the
 catalog lookups together take more than 3 s, the guard gives up on the estimate, says so in the
 Output panel, and runs the query. If you already run DuckDB logging yourself (`CALL enable_logging`),
 the guard leaves the log alone and skips the measurement.
+
+### Opening a table shows its newest data
+
+Double-clicking a table runs `SELECT * FROM <table>` with DBeaver's fetch limit (200 rows). The DuckDB
+driver ignores that limit, so the query downloads the whole table before DBeaver shows the first
+200 rows. On a lake table of 2,815 files that is 220 GB.
+
+So the first time a data editor opens a DuckLake table, the plugin fills in the filter bar with the
+range of one integer column in the table's newest data file, e.g. `id BETWEEN 975000 AND 999999`.
+The range comes from the catalog's statistics in one round trip. DuckLake then reads that one file
+(plus any file whose range overlaps it). There is no `ORDER BY`; rows come in file order.
+
+By default "newest" is the data file committed last, and the column is an integer identity-partition
+column, else the first integer column. That works for tables that only grow at the end. If your
+tables are sorted by a column such as a sequence number, a block height or an epoch day and get
+compacted or backfilled, the file committed last is often an old range rewritten by compaction.
+For those, enter the column names on the connection's **DuckLake storage** tab, under **Query
+guard**, in **Newest-file columns** (provider property `ducklake.newest_file.columns`):
+comma-separated, case-insensitive, in order of preference, e.g. `height, seq`. Then "newest" is the
+file whose statistics for one of those columns reach the highest, and the filter uses the first of
+them that is an integer column with statistics in that file; a table without any of them falls back
+to the default.
+
+A table with no data file yet, or without a usable integer column, opens without a filter. Clear
+the filter bar to see the whole table; the query guard then warns as before, and the filter does
+not come back until you open the table in a new editor.
 
 ## Troubleshooting
 
@@ -244,7 +283,7 @@ docker compose up -d      # S3 on :9000 (console :9001), Postgres on host :5433
 
 | Postgres database | Metadata schema | Appears in DBeaver as | Tables |
 |---|---|---|---|
-| `ducklake_catalog` | `public` | `public` | `main.customers`, `main.orders` |
+| `ducklake_catalog` | `public` | `public` | `main.customers`, `main.orders`, `main.blocks` (1,000,000 rows in 40 files, for the query guard) |
 | `ducklake_catalog` | `sales` | `sales` | `main.deals`, `emea.leads` |
 | `ducklake_catalog` | `finance` | `finance` | `main.invoices` |
 | `analytics` | `public` | `analytics_public` (the plain name is taken) | `main.events` |
