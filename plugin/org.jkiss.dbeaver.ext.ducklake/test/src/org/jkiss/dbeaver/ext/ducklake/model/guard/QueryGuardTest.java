@@ -433,6 +433,13 @@ public final class QueryGuardTest {
         check(QueryGuardEstimate.filterBounds("(height >= 10) AND (height <= 20) AND band = 3")
             .equals(Map.of("height", range(10, 20), "band", range(3, 3))),
             "bounds: a column whose name contains 'and' is not split");
+        check(QueryGuardEstimate.filterBounds("height>10, band<20").equals(Map.of(
+                "height", new QueryGuardEstimate.Range(java.math.BigInteger.valueOf(11), null),
+                "band", new QueryGuardEstimate.Range(null, java.math.BigInteger.valueOf(19)))),
+            "bounds: filters a plan lists as an array arrive joined with a comma, each one required");
+        check(QueryGuardEstimate.filterBounds("height IN (5, 9), band<20").equals(Map.of(
+                "band", new QueryGuardEstimate.Range(null, java.math.BigInteger.valueOf(19)))),
+            "bounds: a comma inside IN (...) does not split, the IN is ignored");
         check(QueryGuardEstimate.filterBounds("height>=10 AND contains(payload, 'it''s height=5 OR 1')")
             .equals(Map.of("height", new QueryGuardEstimate.Range(java.math.BigInteger.TEN, null))),
             "bounds: a literal with a doubled quote and an OR inside it is blanked, the real bound stays");

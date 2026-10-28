@@ -540,7 +540,12 @@ public final class QueryGuardEstimate {
         bounds.merge(m.group(1).toLowerCase(Locale.ROOT), range, Range::intersect);
     }
 
-    /** The text split at the ANDs outside every parenthesis; an AND inside parentheses stays put. */
+    /**
+     * The text split at the ANDs outside every parenthesis; an AND inside parentheses stays put. A
+     * comma outside every parenthesis splits too: a plan that lists several pushed-down filters as a
+     * JSON array reaches here joined with ", " ({@code QueryGuardPlan.string}), each entry a required
+     * filter of its own, and no comparison has a bare comma (those sit inside IN (...) or a CAST).
+     */
     static List<String> conjuncts(String text) {
         List<String> parts = new ArrayList<>();
         int depth = 0;
@@ -553,6 +558,9 @@ public final class QueryGuardEstimate {
                 depth++;
             } else if (c == ')') {
                 depth--;
+            } else if (depth == 0 && c == ',') {
+                parts.add(text.substring(start, i));
+                start = i + 1;
             } else if (depth == 0 && text.regionMatches(true, i, "AND", 0, 3)
                 && (i == 0 || !isWordChar(text.charAt(i - 1)))
                 && (i + 3 >= text.length() || !isWordChar(text.charAt(i + 3)))) {
