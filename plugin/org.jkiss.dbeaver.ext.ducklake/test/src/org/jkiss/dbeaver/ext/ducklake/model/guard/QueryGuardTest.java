@@ -478,14 +478,14 @@ public final class QueryGuardTest {
             "pruned sql: distinct column names for postgres_query\n" + sql);
         check(sql.contains("FROM \"bronze\".ducklake_data_file f"), "pruned sql: metadata schema quoted\n" + sql);
         check(sql.contains("lower(t.table_name) = lower('raw_responses')"), "pruned sql: table\n" + sql);
-        check(sql.contains("AND (st.max_value::numeric < 975000 OR st.min_value::numeric > 999999)"),
+        check(sql.contains("THEN st.max_value::numeric < 975000 OR st.min_value::numeric > 999999 ELSE false END"),
             "pruned sql: height range\n" + sql);
-        check(sql.contains("AND (st.min_value::numeric > 0)"), "pruned sql: open lower end\n" + sql);
+        check(sql.contains("THEN st.min_value::numeric > 0 ELSE false END"), "pruned sql: open lower end\n" + sql);
         check(sql.contains("c.column_type IN ('int8', 'int16', 'int32', 'int64'"), "pruned sql: integer columns only\n" + sql);
         check(sql.contains("AND c.end_snapshot IS NULL AND c.parent_column IS NULL"), "pruned sql: top-level columns only\n" + sql);
         check(sql.contains("f.end_snapshot IS NULL") && sql.contains("d.end_snapshot IS NULL"), "pruned sql: live files only");
-        check(sql.contains("st.min_value ~ '^-?[0-9]+$' AND st.max_value ~ '^-?[0-9]+$' AND ("),
-            "pruned sql: only numeric statistics are cast\n" + sql);
+        check(sql.contains("CASE WHEN st.min_value ~ '^-?[0-9]+$' AND st.max_value ~ '^-?[0-9]+$' THEN "),
+            "pruned sql: only numeric statistics are cast, inside a CASE so the plan cannot cast first\n" + sql);
         check(sql.contains("NOT IN (SELECT st.data_file_id") && sql.contains(" UNION SELECT st.data_file_id"),
             "pruned sql: one set of ruled-out files per bound, joined, never a subquery per file\n" + sql);
         check(!sql.contains("NOT EXISTS") && !sql.contains("LATERAL"), "pruned sql: no per-file subquery\n" + sql);

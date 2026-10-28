@@ -135,8 +135,10 @@ public final class CatalogStats {
                 + " AND c.end_snapshot IS NULL AND c.parent_column IS NULL"
                 + " WHERE lower(c.column_name) = lower(" + pgLiteral(bound.getKey()) + ")"
                 + " AND c.column_type IN " + integerTypes()
-                + " AND st.min_value ~ '^-?[0-9]+$' AND st.max_value ~ '^-?[0-9]+$'"
-                + " AND (" + String.join(" OR ", outside) + ")");
+                // CASE, not two AND-ed predicates: Postgres may evaluate the casts before the
+                // regexes, and a hash column's statistics would abort the whole lookup
+                + " AND CASE WHEN st.min_value ~ '^-?[0-9]+$' AND st.max_value ~ '^-?[0-9]+$'"
+                + " THEN " + String.join(" OR ", outside) + " ELSE false END");
         }
 
         String kept = excluded.isEmpty()
