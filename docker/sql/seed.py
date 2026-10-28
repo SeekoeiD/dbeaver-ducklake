@@ -54,7 +54,7 @@ for stmt in statements:
 # lake.main.blocks: a chain-shaped table with many small files, for the plugin's query guard and
 # its "newest file" default filter. Every INSERT writes one Parquet file, so BLOCK_FILES inserts of
 # BLOCK_ROWS rows each, in height order, give BLOCK_FILES files whose height ranges do not overlap,
-# the same layout as the production bronze tables (partitioned by height_bucket, sorted by height).
+# the layout of a lake table partitioned by height_bucket and sorted by height.
 # The payload is two md5 strings per row so the files are about 2 MB and do not compress away.
 # CREATE OR REPLACE keeps the seed idempotent; the old files stay on S3 as orphans, which only a
 # DuckLake cleanup would remove and nothing here reads.

@@ -52,6 +52,16 @@ public final class DuckLakeConstants {
 
     public static final int DEF_GUARD_THRESHOLD_MB = 100;
 
+    /**
+     * Comma-separated column names, case-insensitive, in order of preference, for the data editor's
+     * default filter (see {@code DuckLakeTable} and guard/NewestFileFilter). The filter prefers an
+     * integer column with one of these names, and the newest file is the one whose statistics for
+     * that column reach the highest. Empty (the default) means no preferred names: the newest file
+     * is the one committed last, and the filter column is an integer identity-partition column,
+     * else the first integer column.
+     */
+    public static final String PROP_NEWEST_FILE_COLUMNS = "ducklake.newest_file.columns";
+
     private DuckLakeConstants() {
     }
 }

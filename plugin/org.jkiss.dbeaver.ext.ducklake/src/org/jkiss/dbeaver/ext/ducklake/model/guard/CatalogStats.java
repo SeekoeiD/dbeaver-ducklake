@@ -8,6 +8,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.StringJoiner;
 
@@ -15,7 +16,7 @@ import java.util.StringJoiner;
  * Per-file statistics from a DuckLake catalog's own metadata tables. Two features need what
  * {@code ducklake_list_files} does not return: the query guard's pruning of a filtered scan (which
  * files a {@code height BETWEEN a AND b} can touch) and the data editor's default filter (the
- * height range of the newest file). Both are a handful of rows the catalog already holds, so they
+ * newest file's range of one column). Both are a handful of rows the catalog already holds, so they
  * cost one catalog round trip and nothing on object storage.
  *
  * <p>DuckLake attaches the metadata database of catalog {@code X} as
@@ -23,8 +24,8 @@ import java.util.StringJoiner;
  * tables sit in the catalog's metadata schema. Each lookup is one {@code postgres_query} against
  * it, so the joins, the {@code ORDER BY ... LIMIT 1} and the aggregation run inside Postgres in a
  * single round trip. Going through DuckDB's postgres scanner instead would scan each metadata table
- * separately, one round trip or more apiece (about 170 ms each from South Africa to the Ireland
- * catalog), and would push down only the filters that are constants.
+ * separately, one round trip or more apiece (about 170 ms each to a catalog on
+ * another continent), and would push down only the filters that are constants.
  *
  * <p>Table and column names follow the DuckLake 1.0 catalog that DuckDB 1.5.4 writes:
  * {@code ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_size_bytes,
@@ -61,29 +62,53 @@ public final class CatalogStats {
 
     /**
      * Every top-level column of the table, in table order, with the min/max of the table's newest
-     * live data file: the file whose {@code height}/{@code blockheight} statistics reach the
-     * highest (the chain tip; the file committed last is often an old range the hourly rewrite
-     * merged), else the last one committed. No file, or no statistics for a column, gives null
-     * min/max.
+     * live data file. With preferred column names, newest is the file whose statistics for any of
+     * those (integer) columns reach the highest, ties and files without such statistics going to
+     * the last committed: in a table sorted by such a column the file committed last is often an
+     * old range that compaction rewrote. Without names it is simply the file committed last. No
+     * file, or no statistics for a column, gives null min/max.
      *
      * <p>Written as hash joins over the table's files, never as a subquery per file: the catalog's
-     * {@code ducklake_file_column_stats} has no index (186,626 rows for litecoin, 2,943 files in
-     * {@code bronze.vouts}), and a per-file subquery over it ran for more than four minutes on the
-     * catalog mirror, while this form takes 0.85 s.
+     * {@code ducklake_file_column_stats} has no index (186,626 rows in one production catalog,
+     * 2,943 files in one of its tables), and a per-file subquery over it ran for more than four
+     * minutes against that catalog, while this form takes 0.85 s.
+     *
+     * @param preferred column names in order of preference, compared case-insensitively; may be empty
      */
-    public static String newestFileSql(String metadataSchema, String schema, String table) {
+    public static String newestFileSql(String metadataSchema, String schema, String table, List<String> preferred) {
         String m = pgIdentifier(metadataSchema) + ".";
-        return "WITH tbl AS (" + liveTable(m, schema, table) + "),"
+        StringJoiner names = new StringJoiner(", ", "(", ")");
+        boolean anyName = false;
+
+        for (String name : preferred) {
+            String trimmed = name.trim();
+
+            if (!trimmed.isEmpty()) {
+                names.add(pgLiteral(trimmed.toLowerCase(Locale.ROOT)));
+                anyName = true;
+            }
+        }
+
+        String files = "WITH tbl AS (" + liveTable(m, schema, table) + "),"
             + " files AS (SELECT f.data_file_id, f.begin_snapshot FROM " + m + "ducklake_data_file f"
-            + " JOIN tbl ON tbl.table_id = f.table_id WHERE f.end_snapshot IS NULL),"
-            + " hcols AS (SELECT c.column_id FROM " + m + "ducklake_column c JOIN tbl ON tbl.table_id = c.table_id"
-            + " WHERE c.end_snapshot IS NULL AND c.parent_column IS NULL"
-            + " AND lower(c.column_name) IN ('height', 'blockheight') AND c.column_type IN " + integerTypes() + "),"
-            + " tops AS (SELECT st.data_file_id, max(CASE WHEN st.max_value ~ '^-?[0-9]+$' THEN st.max_value::numeric END) AS top"
-            + " FROM " + m + "ducklake_file_column_stats st JOIN tbl ON tbl.table_id = st.table_id"
-            + " JOIN files USING (data_file_id) JOIN hcols USING (column_id) GROUP BY st.data_file_id),"
-            + " nf AS (SELECT f.data_file_id FROM files f LEFT JOIN tops USING (data_file_id)"
-            + " ORDER BY tops.top DESC NULLS LAST, f.begin_snapshot DESC, f.data_file_id DESC LIMIT 1)"
+            + " JOIN tbl ON tbl.table_id = f.table_id WHERE f.end_snapshot IS NULL),";
+        String newest;
+
+        if (anyName) {
+            newest = " hcols AS (SELECT c.column_id FROM " + m + "ducklake_column c JOIN tbl ON tbl.table_id = c.table_id"
+                + " WHERE c.end_snapshot IS NULL AND c.parent_column IS NULL"
+                + " AND lower(c.column_name) IN " + names + " AND c.column_type IN " + integerTypes() + "),"
+                + " tops AS (SELECT st.data_file_id, max(CASE WHEN st.max_value ~ '^-?[0-9]+$' THEN st.max_value::numeric END) AS top"
+                + " FROM " + m + "ducklake_file_column_stats st JOIN tbl ON tbl.table_id = st.table_id"
+                + " JOIN files USING (data_file_id) JOIN hcols USING (column_id) GROUP BY st.data_file_id),"
+                + " nf AS (SELECT f.data_file_id FROM files f LEFT JOIN tops USING (data_file_id)"
+                + " ORDER BY tops.top DESC NULLS LAST, f.begin_snapshot DESC, f.data_file_id DESC LIMIT 1)";
+        } else {
+            newest = " nf AS (SELECT f.data_file_id FROM files f"
+                + " ORDER BY f.begin_snapshot DESC, f.data_file_id DESC LIMIT 1)";
+        }
+
+        return files + newest
             + " SELECT c.column_name, c.column_type,"
             + " EXISTS (SELECT 1 FROM " + m + "ducklake_partition_column pc"
             + " JOIN " + m + "ducklake_partition_info pi ON pi.partition_id = pc.partition_id AND pi.table_id = pc.table_id"
@@ -106,7 +131,7 @@ public final class CatalogStats {
      * {@code parent_column IS NULL}: its statistics must not rule the file out).
      *
      * <p>Hash joins, not a {@code NOT EXISTS} per file: see {@link #newestFileSql}; the per-file
-     * form ran 107 s on the catalog mirror for litecoin's vouts, this one 1.5 s.
+     * form ran 107 s against a production catalog for a 2,943-file table, this one 1.5 s.
      */
     public static String prunedFilesSql(String metadataSchema, String schema, String table,
                                         Map<String, QueryGuardEstimate.Range> bounds) {
@@ -201,9 +226,10 @@ public final class CatalogStats {
 
     /** {@link #newestFileSql} on a raw DuckDB connection, cancelled at the deadline. */
     public static List<ColumnStats> newestFile(Connection connection, String catalog, String metadataSchema,
-                                               String schema, String table, long deadline) throws SQLException {
+                                               String schema, String table, List<String> preferred, long deadline)
+        throws SQLException {
         List<ColumnStats> columns = new ArrayList<>();
-        QueryGuard.query(connection, viaPostgres(catalog, newestFileSql(metadataSchema, schema, table)), deadline,
+        QueryGuard.query(connection, viaPostgres(catalog, newestFileSql(metadataSchema, schema, table, preferred)), deadline,
             rs -> columns.add(new ColumnStats(rs.getString(1), rs.getString(2), rs.getBoolean(3), rs.getString(4),
                 rs.getString(5))));
         return columns;

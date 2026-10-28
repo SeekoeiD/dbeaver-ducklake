@@ -178,14 +178,16 @@ of the statement.
 
 Change it on the connection's **DuckLake storage** tab, under **Query guard**: untick the box to turn
 it off, or set **Warn above (MB)** (default 100). New connections and connections saved before 1.3.0
-start with the guard on.
+start with the guard on. The same group holds **Newest-file columns**, which decides which data file
+a table opens on (see [Opening a table shows its newest data](#opening-a-table-shows-its-newest-data));
+empty by default.
 
 What the estimate does not know:
 
 - **The cache.** DuckDB caches the files it reads in memory, so running a query a second time often
   reads nothing. The estimate assumes a cold start.
 - **Filters.** DuckLake skips files using the catalog's min/max statistics, and plain `EXPLAIN` can't
-  show that. For a filter that bounds an integer column (`height BETWEEN a AND b`, `blockheight = n`)
+  show that. For a filter that bounds an integer column (`height BETWEEN a AND b`, `id = n`)
   the guard asks the catalog itself which files overlap the bounds and counts only those, so a
   height lookup on a big table no longer asks. Other filters (strings, timestamps, `OR`) are shown
   as "up to" the full table. Row groups skipped inside a file are not counted either way.
@@ -222,17 +224,24 @@ driver ignores that limit, so the query downloads the whole table before DBeaver
 200 rows. On a lake table of 2,815 files that is 220 GB.
 
 So the first time a data editor opens a DuckLake table, the plugin fills in the filter bar with the
-height range of the table's newest data file, e.g. `height BETWEEN 975000 AND 999999`. "Newest" is
-the file whose `height` or `blockheight` statistics reach the highest, the chain tip (the file
-committed last is often an old range rewritten by compaction); a table without such a column gets the
-file committed last. The range comes from the catalog's statistics in one round trip. DuckLake
-then reads that one file (plus any file whose range overlaps it). There is no `ORDER BY`; rows come
-in file order.
+range of one integer column in the table's newest data file, e.g. `id BETWEEN 975000 AND 999999`.
+The range comes from the catalog's statistics in one round trip. DuckLake then reads that one file
+(plus any file whose range overlaps it). There is no `ORDER BY`; rows come in file order.
 
-The column is the first integer column named `height` or `blockheight`, else an integer partition
-column, else the first integer column. A table with no data file yet, or without such a column,
-opens without a filter. Clear the filter bar to see the whole table; the query guard then warns as
-before, and the filter does not come back until you open the table in a new editor.
+By default "newest" is the data file committed last, and the column is an integer identity-partition
+column, else the first integer column. That works for tables that only grow at the end. If your
+tables are sorted by a column such as a sequence number, a block height or an epoch day and get
+compacted or backfilled, the file committed last is often an old range rewritten by compaction.
+For those, enter the column names on the connection's **DuckLake storage** tab, under **Query
+guard**, in **Newest-file columns** (provider property `ducklake.newest_file.columns`):
+comma-separated, case-insensitive, in order of preference, e.g. `height, seq`. Then "newest" is the
+file whose statistics for one of those columns reach the highest, and the filter uses the first of
+them that is an integer column with statistics in that file; a table without any of them falls back
+to the default.
+
+A table with no data file yet, or without a usable integer column, opens without a filter. Clear
+the filter bar to see the whole table; the query guard then warns as before, and the filter does
+not come back until you open the table in a new editor.
 
 ## Troubleshooting
 

@@ -87,13 +87,18 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
   and counts a LIMIT-stopped scan as every file's footer plus the largest file (measured: DuckDB
   1.5.4 opens every footer at 1, 4 and 32 threads alike). Write every catalog query as CTEs that
   join `ducklake_file_column_stats` once to the table's live files, never a subquery per file:
-  the catalog has no index on that table (litecoin: 186k rows), a per-file `NOT EXISTS` took
-  107 s on the catalog mirror and a per-file LATERAL over 4 minutes, and DuckDB JDBC's
+  the catalog has no index on that table (186k rows in one production catalog), a per-file
+  `NOT EXISTS` took 107 s against it and a per-file LATERAL over 4 minutes, and DuckDB JDBC's
   `cancel()` does not interrupt a running `postgres_query`, so no deadline saves a slow one.
 - Tables are `DuckLakeTable` (`DuckLakeMetaModel.createTableOrViewImpl`). Its `readData` gives the
-  data editor's first read of a table a WHERE on the newest data file's height range
+  data editor's first read of a table a WHERE on one integer column's range in the newest data file
   (`guard/NewestFileFilter`), because DuckDB JDBC ignores `setMaxRows` and double-click would
-  download the whole table. The viewer replaces its filter on the first read, so the WHERE is set
+  download the whole table. Which file is newest and which column is used follow the connection's
+  `ducklake.newest_file.columns` (`PROP_NEWEST_FILE_COLUMNS`, "Newest-file columns" in the Query
+  guard group): with names, the file whose statistics for them reach the highest; without (the
+  default), the file committed last and an identity-partition or first integer column. No column
+  names are hardwired: this is a public repo, and naming conventions of particular lakes belong in
+  the connection settings (or a companion plugin's presets), not in the code. The viewer replaces its filter on the first read, so the WHERE is set
   again on the viewer's live filter via reflection (`getDataFilter()`); without that method no
   default is applied. Checked against DBeaver 26.2.3 bytecode only.
 - Connection settings are DBeaver provider properties with keys in `DuckLakeConstants`. The same

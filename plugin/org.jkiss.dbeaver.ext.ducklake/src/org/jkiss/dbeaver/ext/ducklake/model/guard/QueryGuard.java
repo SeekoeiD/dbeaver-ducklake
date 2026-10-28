@@ -351,7 +351,7 @@ public final class QueryGuard {
      * each file's min/max statistics, or null when the filter has no such bound or the metadata
      * schema is unknown. Without this, the data editor's default filter on a table's newest file
      * ({@code height BETWEEN a AND b}, see {@code DuckLakeTable}) was estimated as the whole table:
-     * 220 GB for {@code litecoin.bronze.raw_responses}, against one file actually read.
+     * 220 GB for a 2,815-file table, against one file actually read.
      */
     @Nullable
     private static QueryGuardEstimate.TableFiles pruneByStatistics(

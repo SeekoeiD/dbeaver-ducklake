@@ -36,10 +36,11 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>Double-clicking a table runs {@code SELECT * FROM t} with a JDBC fetch limit, which DuckDB
  * ignores, so the whole table comes down from object storage: the query guard rightly warned
- * "about 220 GB" for {@code litecoin.bronze.raw_responses}. The first time a data editor reads a
- * table with no filter of the user's own, this class adds a WHERE on the height range of the
- * table's newest data file ({@link NewestFileFilter}), taken from the catalog's statistics in one
- * metadata round trip. DuckLake prunes the scan to that file; there is no ORDER BY.
+ * "about 220 GB" for a 2,815-file table. The first time a data editor reads a table with no filter
+ * of the user's own, this class adds a WHERE on one integer column's range in the table's newest
+ * data file ({@link NewestFileFilter}), taken from the catalog's statistics in one metadata round
+ * trip. DuckLake prunes the scan to that file; there is no ORDER BY. Which column, and so which
+ * file counts as newest, follows the connection's {@link DuckLakeConstants#PROP_NEWEST_FILE_COLUMNS}.
  *
  * <p>The WHERE goes into the data editor's own filter, so it shows in the filter bar and the user
  * clears it like any filter they typed; the next read then has no filter and runs as before, with
@@ -126,7 +127,7 @@ public class DuckLakeTable extends GenericTable {
     }
 
     /**
-     * The WHERE for the newest file's height range, or null when the table has no file, no integer
+     * The WHERE for the newest file's range of one column, or null when the table has no file, no integer
      * column with statistics, or the lookup fails. Runs on the raw JDBC connection, so the query
      * guard does not see it, and only in auto-commit mode: any failed statement aborts an open
      * DuckDB transaction, and a default filter is not worth that.
@@ -152,9 +153,11 @@ public class DuckLakeTable extends GenericTable {
                 return null;
             }
 
+            List<String> preferred = NewestFileFilter.parseColumns(getDataSource().getContainer()
+                .getConnectionConfiguration().getProviderProperty(DuckLakeConstants.PROP_NEWEST_FILE_COLUMNS));
             List<CatalogStats.ColumnStats> columns = CatalogStats.newestFile(connection, catalog, metadataSchema,
-                getSchema().getName(), getName(), System.currentTimeMillis() + LOOKUP_MS);
-            NewestFileFilter.Choice choice = NewestFileFilter.choose(columns);
+                getSchema().getName(), getName(), preferred, System.currentTimeMillis() + LOOKUP_MS);
+            NewestFileFilter.Choice choice = NewestFileFilter.choose(columns, preferred);
 
             if (choice == null) {
                 return null;

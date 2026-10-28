@@ -25,7 +25,7 @@ import java.util.regex.Pattern;
  * magnitude and never a promise.
  *
  * <p>Two refinements use the catalog beyond the file list. A scan whose filter bounds an integer
- * column ({@code height BETWEEN a AND b}, {@code blockheight = n}) counts only the files whose
+ * column ({@code height BETWEEN a AND b}, {@code id = n}) counts only the files whose
  * min/max statistics overlap the bounds, which is the pruning DuckLake itself does before it opens
  * a file. And a scan that a LIMIT stops early counts what such a scan was measured to read on
  * DuckDB 1.5.4: the footer of every file plus the first rows of one file (see {@link #estimate}).

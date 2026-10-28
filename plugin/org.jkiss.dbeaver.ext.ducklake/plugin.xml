@@ -49,6 +49,7 @@
                     <propertyGroup label="DuckLake query guard">
                         <property id="ducklake.guard.enabled"      label="Query guard"      type="boolean" description="Before a read query runs, estimate how much it will read from object storage (EXPLAIN plus the catalog's file sizes) and ask above the threshold; afterwards, print what it actually read in the Output panel. Default on."/>
                         <property id="ducklake.guard.threshold_mb" label="Warn above (MB)"  type="string"  description="Estimated read size above which the query guard asks before running a query. Default 100."/>
+                        <property id="ducklake.newest_file.columns" label="Newest-file columns" type="string"  description="Comma-separated integer column names, in order of preference, that decide which data file a table opens on (the one whose statistics for the column reach the highest) and which column the default filter uses. Empty: the file committed last, filtered on an integer partition column, else the first integer column."/>
                     </propertyGroup>
                     <propertyGroup label="DuckLake storage (S3)">
                         <property id="ducklake.s3.endpoint"  label="S3 endpoint (host:port)" type="string"  description="S3 endpoint without scheme, e.g. localhost:9000 or s3.amazonaws.com. Leave blank for AWS default."/>
