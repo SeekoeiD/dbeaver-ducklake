@@ -1,0 +1,16 @@
+[
+    {
+        "name": "DUCKLAKE_SCAN",
+        "children": [],
+        "extra_info": {
+            "Table": "lake.main.blocks",
+            "Projections": [
+                "height",
+                "height_bucket",
+                "hash",
+                "payload"
+            ],
+            "Estimated Cardinality": "100000"
+        }
+    }
+]

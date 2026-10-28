@@ -171,6 +171,17 @@ The dialog lists each table with its file count and estimate. **Cancel** stops t
 runs it. Tick **Don't ask again for this connection** to switch the guard off for that connection;
 the setting is saved with it.
 
+When the statement is a plain read of one table, `SELECT <columns> FROM <table> [[AS] alias]` with
+no `WHERE`, `ORDER BY`, `GROUP BY`, `LIMIT`, join, `UNION`, subquery or CTE (and a plan with nothing
+but projections above the scan), the dialog has a third button, **Newest file only**. It runs the
+statement on the table's newest data file, the same one the data editor opens on (see below), by
+adding `WHERE <table or alias>.<column> BETWEEN <min> AND <max>`. The dialog shows that range and
+what it would read, e.g. `Newest file only: height BETWEEN 3203188 AND 3203190 (1 file, ~4.2 MB)`.
+The SQL editor keeps your text as typed; the Output panel gets a line
+`Query guard: ran on the newest file: <SQL>` with the statement that actually ran. A table without
+a usable integer column, or a lookup that does not finish within the guard's 3 s, gets no third
+button.
+
 After the query, the SQL editor's **Output** panel (the editor's *Show server output* button) gets
 a line like `Query guard: read 47 MB from object storage (114 requests) in 0.29 s`. That number is
 measured: the plugin turns on DuckDB's HTTP log for its own connections and sums the `GET` responses
