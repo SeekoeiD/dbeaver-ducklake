@@ -82,7 +82,10 @@ Read `DuckLakeDataSourceProvider.java` first, then `DuckLakeDataSource.java`, th
   print bare table names, 2.0 plans qualified ones; the driver is pinned to 2.0.0.0 since 1.4.1
   (1.5.4.0 from 1.3.2 to 1.4.0), so keep both working. The init SQL sets
   `external_file_cache_remote_max_block_size` (64 MiB) and `read_ahead_depth` (0), which only 2.0
-  knows: a 1.5 driver fails to connect with them, so the pin and those lines move together.
+  knows: a 1.5 driver fails to connect with them, so the pin and those lines move together. It
+  also sets `parquet_metadata_cache = true` (1.4.3): without it every query re-parses each footer
+  it opens, and inside DBeaver on Windows (default heap, not the segment heap the CLI opts into)
+  that made a warm 200-footer index lookup 18 s instead of 0.3 s.
 - The guard reads file statistics from DuckLake's metadata tables (`guard/CatalogStats`): one
   `postgres_query` against `__ducklake_metadata_<catalog>`, in the metadata schema discovery
   recorded (`DuckLakeDataSource.getMetadataSchema`). It prunes filtered scans with integer bounds,
