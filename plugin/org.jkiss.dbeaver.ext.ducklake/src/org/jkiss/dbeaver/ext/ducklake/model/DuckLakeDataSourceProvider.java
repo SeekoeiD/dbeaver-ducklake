@@ -127,6 +127,15 @@ public class DuckLakeDataSourceProvider extends DuckDBDataSourceProvider {
         // it, so the driver pin in plugin.xml and these two lines move together.
         b.append("SET external_file_cache_remote_max_block_size = 67108864;\n");
         b.append("SET read_ahead_depth = 0;\n");
+        // Keep parsed Parquet footers between queries. Without it DuckDB parses every footer a
+        // query opens again on every run, and inside DBeaver that costs far more than in the
+        // DuckDB CLI: the CLI opts into the Windows segment heap, dbeaver.exe (which hosts the
+        // JVM and the driver) does not, and footer parsing on the default heap stalls on its
+        // lock across DuckDB's threads. An address lookup on a 6,463-part index that opens about
+        // 200 footers of 3.8 MB took 18 s warm through JDBC (1.8 s in the CLI) and 0.3 s with
+        // this on (ledgerlink-ducklake-docs experiments/dbeaver-lookup-minute-2026-11-27). The
+        // cache sits under memory_limit (OBJECT_CACHE in duckdb_memory()). 1.5 knows it too.
+        b.append("SET parquet_metadata_cache = true;\n");
 
         if (useS3) {
             b.append("INSTALL httpfs;   LOAD httpfs;\n");

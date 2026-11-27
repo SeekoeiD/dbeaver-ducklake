@@ -39,6 +39,12 @@ chain), or a local-filesystem lake — empty fields are simply omitted from the 
   in 5. With `external_file_cache_remote_max_block_size` at 64 MiB the same scan is 1 GET, and with
   `read_ahead_depth = 0` the first page is back to 1.5's bytes; the plugin sets both on every
   connection. On a low-latency client next to the storage, 2.0's defaults are as fast or faster.
+- **Parsed Parquet footers stay cached** (`parquet_metadata_cache = true`, since 1.4.3). Without
+  it DuckDB parses every footer a query opens again on each run, and on Windows that is slow inside
+  DBeaver: the DuckDB CLI runs on the Windows segment heap, `dbeaver.exe` does not, and footer
+  parsing on 32 threads stalls on the default heap's lock. An address lookup that opens about 200
+  footers of 3.8 MB each took 18 s on every warm run through the JDBC driver (1.8 s in the CLI on
+  the same machine) and 0.3 s with the cache. The cache counts against `memory_limit`.
 
 ## Install
 

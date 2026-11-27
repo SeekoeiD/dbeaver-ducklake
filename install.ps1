@@ -22,7 +22,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $src = $PSScriptRoot
-$version = "1.4.2"
+$version = "1.4.3"
 $jars = @(
     "org.jkiss.dbeaver.ext.ducklake_$version.jar",
     "org.jkiss.dbeaver.ext.ducklake.ui_$version.jar"
